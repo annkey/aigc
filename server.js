@@ -1,4 +1,4 @@
-﻿const http = require("node:http");
+const http = require("node:http");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
@@ -587,13 +587,13 @@ async function fileToDataUri(file) {
 
 function ensureProviderEnabled(provider) {
   if (provider === "meshy" && !MESHY_API_KEY) {
-    const error = new Error("MESHY_API_KEY is not configured in .env.local.");
+    const error = new Error("MESHY_API_KEY is not configured in the runtime environment.");
     error.status = 500;
     throw error;
   }
 
   if (provider === "tripo" && !TRIPO_API_KEY) {
-    const error = new Error("TRIPO_API_KEY is not configured in .env.local.");
+    const error = new Error("TRIPO_API_KEY is not configured in the runtime environment.");
     error.status = 500;
     throw error;
   }
