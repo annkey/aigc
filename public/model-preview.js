@@ -8,6 +8,7 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { KStereoEffect } from "/vendor/kmax/KStereoEffect.js";
+import { KStylusRaycaster } from "/vendor/kmax/KStylusRaycaster.js";
 import { WSTrack } from "/vendor/kmax/ws-track.js";
 
 const uploadCard = document.getElementById("upload-card");
@@ -26,6 +27,8 @@ const fullscreenButton = document.getElementById("toggle-fullscreen");
 const exportButton = document.getElementById("export-image");
 const fileList = document.getElementById("file-list");
 const recentList = document.getElementById("recent-list");
+const stereoDeviceBadge = document.getElementById("stereo-device-badge");
+const stereoStatusDetail = document.getElementById("stereo-status-detail");
 const statusText = document.getElementById("status-text");
 const fileCount = document.getElementById("file-count");
 const formatStat = document.getElementById("format-stat");
@@ -46,7 +49,18 @@ const stereoConfig = {
   screenWidth: 0.544,
   screenHeight: 0.306,
   screenScale: 1,
-  trackingScale: 1.0
+  trackingScale: 0.32,
+  trackingScaleX: 0.24,
+  trackingScaleY: 0.16,
+  trackingScaleZ: 0.2,
+  trackingSmoothing: 0.1,
+  fitSize: 0.17,
+  targetDepth: -0.135,
+  cameraDistance: 0.46,
+  penRotationSpeed: 3.2,
+  penMoveScaleX: 1.25,
+  penMoveScaleY: 1.1,
+  penScaleSpeed: 1.8
 };
 
 let currentObject = null;
@@ -58,14 +72,33 @@ let isStereoEnabled = false;
 let isStereoDisplayActive = false;
 let stereoEffect = null;
 let stereoTracker = null;
+let stylusRaycaster = null;
 let stereoTrackingData = null;
 let stereoBaseCameraPosition = null;
 let stereoBaseTarget = new THREE.Vector3();
+let isPointerModelRotating = false;
+let activePointerId = null;
+let pointerStart = { x: 0, y: 0 };
+let modelRotationOnPointerStart = new THREE.Euler(0, 0, 0, "YXZ");
+let lastPenPose = null;
+let wasPenPressed = false;
+let smoothedEyeOffset = new THREE.Vector3();
+let lastStylusIntersections = [];
+let isPenGrabbingModel = false;
+let penGrabStartPose = null;
+let penGrabStartPosition = new THREE.Vector3();
+let penGrabStartQuaternion = new THREE.Quaternion();
+let penGrabStartScale = new THREE.Vector3(1, 1, 1);
+let penGrabStartRotation = null;
+let penGrabHitPointLocal = null;
 
 const animationClock = new THREE.Clock();
 
 const scene = new THREE.Scene();
+const previewRoot = new THREE.Group();
+scene.add(previewRoot);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
+const stereoCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 10);
 camera.position.set(3.5, 2.2, 5.5);
 
 const renderer = new THREE.WebGLRenderer({
@@ -98,7 +131,7 @@ scene.add(fillLight);
 
 const grid = new THREE.GridHelper(20, 20, 0xd7b08f, 0xe7d6c7);
 grid.position.y = -0.001;
-scene.add(grid);
+previewRoot.add(grid);
 
 const groundMaterial = new THREE.MeshStandardMaterial({
   color: 0xf4ece1,
@@ -109,7 +142,7 @@ const ground = new THREE.Mesh(new THREE.CircleGeometry(8, 64), groundMaterial);
 ground.rotation.x = -Math.PI / 2;
 ground.position.y = -0.002;
 ground.receiveShadow = true;
-scene.add(ground);
+previewRoot.add(ground);
 
 bootstrap();
 
@@ -118,6 +151,9 @@ function bootstrap() {
   stereoEffect.setSize(window.innerWidth, window.innerHeight);
   stereoEffect.setViewScale(1);
   stereoEffect.setCameraFrustum = applyStereoCameraFrustum;
+  stylusRaycaster = new KStylusRaycaster(scene);
+  stylusRaycaster.line.visible = false;
+  stylusRaycaster.helper.visible = false;
 
   fileInput.addEventListener("change", (event) => applySelectedFiles(Array.from(event.target.files || [])));
   entryFileSelect.addEventListener("change", () => {
@@ -138,10 +174,18 @@ function bootstrap() {
   exportButton.addEventListener("click", exportPng);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
   window.addEventListener("resize", handleResize);
+  renderer.domElement.addEventListener("pointerdown", handleViewerPointerDown);
+  renderer.domElement.addEventListener("pointermove", handleViewerPointerMove);
+  renderer.domElement.addEventListener("pointerup", handleViewerPointerUp);
+  renderer.domElement.addEventListener("pointercancel", handleViewerPointerUp);
+  renderer.domElement.addEventListener("lostpointercapture", handleViewerPointerUp);
   window.addEventListener("kmax-module-ready", () => {
     syncStereoRuntimeParams();
+    if (isStereoEnabled && document.fullscreenElement === viewerShell) {
+      maybeActivateStereoDisplay();
+    }
     updateStereoButton();
-    if (isStereoEnabled) {
+    if (isStereoEnabled && !isStereoDisplayActive) {
       setStatus("裸眼 3D 引擎已就绪，进入全屏后生效");
     }
   });
@@ -159,6 +203,7 @@ function bootstrap() {
   loadRecentEntries();
   applyTheme(themeSelect.value);
   updateLightStrength(Number(lightRange.value || 1.4));
+  controls.addEventListener("change", handleControlsChange);
   handleResize();
   animate();
 
@@ -180,8 +225,11 @@ function setupStereoTracking() {
     };
 
     stereoTracker.ws?.addEventListener("open", () => {
+      if (isStereoEnabled && document.fullscreenElement === viewerShell) {
+        maybeActivateStereoDisplay();
+      }
       updateStereoButton();
-      if (isStereoEnabled) {
+      if (isStereoEnabled && !isStereoDisplayActive) {
         setStatus("检测到裸眼 3D 设备服务，进入全屏后将启用立体显示");
       }
     });
@@ -355,7 +403,7 @@ async function loadGltf(entryFile, manager) {
   }
 
   currentObject = gltf.scene;
-  scene.add(currentObject);
+  previewRoot.add(currentObject);
   normalizeObject(currentObject);
   frameObject(currentObject);
   playAnimations(gltf.animations || []);
@@ -374,7 +422,7 @@ async function loadFbx(entryFile, manager) {
   }
 
   currentObject = fbx;
-  scene.add(currentObject);
+  previewRoot.add(currentObject);
   normalizeObject(currentObject);
   frameObject(currentObject);
   playAnimations(fbx.animations || []);
@@ -414,7 +462,7 @@ async function loadObj(entryFile, manager) {
     }
   });
 
-  scene.add(currentObject);
+  previewRoot.add(currentObject);
   normalizeObject(currentObject);
   frameObject(currentObject);
   playAnimations([]);
@@ -436,7 +484,7 @@ async function loadStl(entryFile) {
   currentObject = new THREE.Mesh(geometry, material);
   currentObject.castShadow = true;
   currentObject.receiveShadow = true;
-  scene.add(currentObject);
+  previewRoot.add(currentObject);
   normalizeObject(currentObject);
   frameObject(currentObject);
   playAnimations([]);
@@ -492,10 +540,11 @@ function clearCurrentObject() {
     return;
   }
 
-  scene.remove(currentObject);
+  previewRoot.remove(currentObject);
   disposeObject(currentObject);
   currentObject = null;
   animationMixer = null;
+  resetStereoSceneFit();
 }
 
 function disposeObject(root) {
@@ -792,28 +841,64 @@ function updateGridButton() {
 function toggleStereoMode() {
   isStereoEnabled = !isStereoEnabled;
   captureStereoReferenceCamera();
-  updateStereoButton();
 
   if (isStereoEnabled) {
-    setStatus("裸眼 3D 已开启，进入全屏后生效");
+    if (document.fullscreenElement === viewerShell) {
+      maybeActivateStereoDisplay();
+    } else {
+      setStatus("裸眼 3D 已开启，进入全屏后生效");
+    }
   } else {
     deactivateStereoDisplay();
     setStatus("裸眼 3D 已关闭");
   }
+
+  updateStereoButton();
 }
 
 function updateStereoButton() {
   const runtimeReady = Boolean(window.Module?.loaded);
   const trackerConnected = Boolean(stereoTracker?.ws && stereoTracker.ws.readyState === WebSocket.OPEN);
   const suffix = isStereoEnabled ? "开" : "关";
+  const stereoActive = isStereoDisplayActive && document.fullscreenElement === viewerShell;
 
   stereoButton.classList.toggle("active", isStereoEnabled);
+  stereoButton.classList.toggle("stereo-live", stereoActive);
   stereoButton.textContent = `裸眼 3D：${suffix}`;
   stereoButton.title = runtimeReady
     ? trackerConnected
       ? "设备服务已连接，进入全屏后可启用立体显示"
       : "立体渲染引擎已加载，未检测到设备追踪服务时将使用固定视角立体显示"
     : "立体渲染引擎正在初始化";
+
+  if (stereoDeviceBadge) {
+    stereoDeviceBadge.classList.remove("online", "ready", "offline");
+
+    if (stereoActive) {
+      stereoDeviceBadge.classList.add("ready");
+      stereoDeviceBadge.textContent = trackerConnected ? "立体输出中" : "固定视角输出中";
+    } else if (trackerConnected) {
+      stereoDeviceBadge.classList.add("online");
+      stereoDeviceBadge.textContent = "设备已连接";
+    } else {
+      stereoDeviceBadge.classList.add("offline");
+      stereoDeviceBadge.textContent = runtimeReady ? "设备未连接" : "引擎初始化中";
+    }
+  }
+
+  if (stereoStatusDetail) {
+    if (stereoActive) {
+      stereoStatusDetail.textContent = trackerConnected
+        ? "当前已经进入裸眼 3D 全屏显示。模型固定在中心，头部追踪已做弱化和平滑处理，鼠标拖拽和按住笔键移动会旋转模型，笔射线会同步显示。"
+        : "当前已经进入裸眼 3D 全屏显示，但未检测到设备追踪服务，正在使用固定中心的立体输出。鼠标拖拽仍可旋转模型。";
+    } else if (isStereoEnabled) {
+      stereoStatusDetail.textContent = runtimeReady
+        ? "裸眼 3D 已开启。进入全屏后会切到示例同款的固定中心立体显示；如果检测到设备服务，会自动启用头部追踪和笔追旋转。"
+        : "裸眼 3D 已开启，正在等待立体渲染引擎初始化完成。初始化完成后进入全屏即可切到立体显示。";
+    } else {
+      stereoStatusDetail.textContent = "当前为普通 3D 预览模式。开启裸眼 3D 后，进入全屏即可切到立体显示。";
+    }
+  }
 }
 
 async function toggleFullscreen() {
@@ -826,6 +911,7 @@ async function toggleFullscreen() {
 
 function handleFullscreenChange() {
   updateFullscreenButton();
+  viewerShell.classList.toggle("fullscreen-active", document.fullscreenElement === viewerShell);
 
   if (document.fullscreenElement === viewerShell) {
     maybeActivateStereoDisplay();
@@ -844,12 +930,13 @@ function updateFullscreenButton() {
 
 function maybeActivateStereoDisplay() {
   if (!isStereoEnabled || !window.Module?.loaded) {
+    updateStereoButton();
     return;
   }
 
   isStereoDisplayActive = true;
   controls.enabled = false;
-  captureStereoReferenceCamera();
+  updateStereoSceneFit();
   syncStereoRuntimeParams();
 
   try {
@@ -857,11 +944,23 @@ function maybeActivateStereoDisplay() {
   } catch {}
 
   setStatus("裸眼 3D 全屏模式已启用");
+  updateStereoButton();
 }
 
 function deactivateStereoDisplay() {
   if (!isStereoDisplayActive) {
     controls.enabled = true;
+    resetStereoSceneFit();
+    resetPenInteractionState();
+    stylusRaycaster?.updatePose(null);
+    if (stylusRaycaster) {
+      stylusRaycaster.line.visible = false;
+      stylusRaycaster.helper.visible = false;
+    }
+    smoothedEyeOffset.set(0, 0, 0);
+    isPointerModelRotating = false;
+    activePointerId = null;
+    updateStereoButton();
     return;
   }
 
@@ -871,11 +970,276 @@ function deactivateStereoDisplay() {
   try {
     stereoTracker?.setDisplayMode?.(0, 0);
   } catch {}
+
+  resetStereoSceneFit();
+  resetPenInteractionState();
+  stylusRaycaster?.updatePose(null);
+  if (stylusRaycaster) {
+    stylusRaycaster.line.visible = false;
+    stylusRaycaster.helper.visible = false;
+  }
+  smoothedEyeOffset.set(0, 0, 0);
+  isPointerModelRotating = false;
+  activePointerId = null;
+
+  updateStereoButton();
 }
 
 function captureStereoReferenceCamera() {
   stereoBaseCameraPosition = camera.position.clone();
   stereoBaseTarget = controls.target.clone();
+}
+
+function updateStereoSceneFit() {
+  if (!currentObject) {
+    resetStereoSceneFit();
+    return;
+  }
+
+  previewRoot.position.set(0, 0, 0);
+  previewRoot.scale.setScalar(1);
+  previewRoot.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(currentObject);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const stereoScale = stereoConfig.fitSize / maxDim;
+  const stereoTarget = new THREE.Vector3(0, 0, stereoConfig.targetDepth);
+
+  previewRoot.scale.setScalar(stereoScale);
+  previewRoot.position.copy(stereoTarget).sub(center.multiplyScalar(stereoScale));
+  previewRoot.updateMatrixWorld(true);
+
+  stereoBaseTarget.copy(stereoTarget);
+  stereoBaseCameraPosition = new THREE.Vector3(0, 0, stereoConfig.cameraDistance);
+  smoothedEyeOffset.set(0, 0, 0);
+
+  stereoCamera.position.copy(stereoBaseCameraPosition);
+  stereoCamera.near = 0.01;
+  stereoCamera.far = 10;
+  stereoCamera.aspect = camera.aspect;
+  stereoCamera.lookAt(stereoBaseTarget);
+  stereoCamera.updateProjectionMatrix();
+}
+
+function resetStereoSceneFit() {
+  previewRoot.position.set(0, 0, 0);
+  previewRoot.scale.setScalar(1);
+  previewRoot.updateMatrixWorld(true);
+}
+
+function isStereoInteractive() {
+  return isStereoDisplayActive && document.fullscreenElement === viewerShell && Boolean(currentObject);
+}
+
+function handleViewerPointerDown(event) {
+  if (!isStereoInteractive() || event.button !== 0) {
+    return;
+  }
+
+  isPointerModelRotating = true;
+  activePointerId = event.pointerId;
+  pointerStart = { x: event.clientX, y: event.clientY };
+  modelRotationOnPointerStart.copy(currentObject.rotation);
+  renderer.domElement.setPointerCapture?.(event.pointerId);
+  setStatus("裸眼 3D 交互中：拖拽可旋转模型");
+}
+
+function handleViewerPointerMove(event) {
+  if (!isPointerModelRotating || activePointerId !== event.pointerId || !currentObject) {
+    return;
+  }
+
+  const deltaX = event.clientX - pointerStart.x;
+  const deltaY = event.clientY - pointerStart.y;
+  const rotationSpeed = 0.008;
+
+  currentObject.rotation.order = "YXZ";
+  currentObject.rotation.y = modelRotationOnPointerStart.y + deltaX * rotationSpeed;
+  currentObject.rotation.x = THREE.MathUtils.clamp(
+    modelRotationOnPointerStart.x + deltaY * rotationSpeed,
+    -Math.PI / 2,
+    Math.PI / 2
+  );
+}
+
+function handleViewerPointerUp(event) {
+  if (activePointerId !== null && event.pointerId !== undefined && activePointerId !== event.pointerId) {
+    return;
+  }
+
+  isPointerModelRotating = false;
+  activePointerId = null;
+}
+
+function resetPenInteractionState() {
+  lastPenPose = null;
+  wasPenPressed = false;
+  isPenGrabbingModel = false;
+  penGrabStartPose = null;
+  penGrabStartRotation = null;
+  penGrabHitPointLocal = null;
+}
+
+function getCurrentModelMeshes() {
+  const meshes = [];
+
+  currentObject?.traverse((child) => {
+    if (child.isMesh) {
+      meshes.push(child);
+    }
+  });
+
+  return meshes;
+}
+
+function updateStylusRay() {
+  if (!stylusRaycaster) {
+    return;
+  }
+
+  if (!isStereoInteractive()) {
+    stylusRaycaster.line.visible = false;
+    stylusRaycaster.helper.visible = false;
+    stylusRaycaster.updatePose(null);
+    lastStylusIntersections = [];
+    return;
+  }
+
+  const pen = stereoTrackingData?.pen;
+  if (!pen) {
+    stylusRaycaster.line.visible = false;
+    stylusRaycaster.helper.visible = false;
+    stylusRaycaster.updatePose(null);
+    lastStylusIntersections = [];
+    return;
+  }
+
+  stylusRaycaster.line.visible = true;
+  stylusRaycaster.helper.visible = true;
+  stylusRaycaster.updatePose(pen);
+
+  if (isPenGrabbingModel && currentObject && penGrabHitPointLocal) {
+    const lockedHitPoint = currentObject.localToWorld(penGrabHitPointLocal.clone());
+    stylusRaycaster.helper.position.copy(lockedHitPoint);
+    lastStylusIntersections = [];
+    return;
+  }
+
+  lastStylusIntersections = stylusRaycaster.intersectObjects(getCurrentModelMeshes());
+}
+
+function getStylusPoseInPreviewRoot() {
+  if (!stylusRaycaster) {
+    return null;
+  }
+
+  const localPosition = previewRoot.worldToLocal(stylusRaycaster.line.position.clone());
+  const previewRootWorldQuaternion = previewRoot.getWorldQuaternion(new THREE.Quaternion());
+  const lineWorldQuaternion = stylusRaycaster.line.getWorldQuaternion(new THREE.Quaternion());
+  const localQuaternion = previewRootWorldQuaternion.invert().multiply(lineWorldQuaternion);
+
+  return {
+    position: localPosition,
+    quaternion: localQuaternion
+  };
+}
+
+function beginPenGrab(pen) {
+  if (!currentObject || !lastStylusIntersections.length) {
+    return false;
+  }
+
+  const stylusPose = getStylusPoseInPreviewRoot();
+  if (!stylusPose) {
+    return false;
+  }
+
+  penGrabStartPose = {
+    x: pen.pos.x,
+    y: pen.pos.y,
+    z: pen.pos.z
+  };
+  penGrabHitPointLocal = currentObject.worldToLocal(lastStylusIntersections[0].point.clone());
+  penGrabStartPosition.copy(currentObject.position);
+  penGrabStartQuaternion.copy(currentObject.quaternion);
+  penGrabStartScale.copy(currentObject.scale);
+  penGrabStartRotation = {
+    stylusQuaternion: stylusPose.quaternion.clone(),
+    offset: currentObject.position.clone().sub(stylusPose.position).applyQuaternion(currentObject.quaternion.clone().invert()),
+    rotationOffset: stylusPose.quaternion.clone().invert().multiply(currentObject.quaternion.clone())
+  };
+  isPenGrabbingModel = true;
+  setStatus("笔已抓住模型：移动、旋转、前后推进都可控制模型");
+  return true;
+}
+
+function updatePenGrab(pen) {
+  if (!isPenGrabbingModel || !currentObject || !penGrabStartPose || !penGrabStartRotation) {
+    return;
+  }
+
+  const stylusPose = getStylusPoseInPreviewRoot();
+  if (!stylusPose) {
+    return;
+  }
+
+  const nextQuaternion = stylusPose.quaternion.clone().multiply(penGrabStartRotation.rotationOffset);
+  currentObject.quaternion.copy(nextQuaternion);
+
+  const nextPosition = penGrabStartRotation.offset.clone().applyQuaternion(nextQuaternion).add(stylusPose.position);
+  currentObject.position.copy(nextPosition);
+
+  const depthDelta = penGrabStartPose.z - pen.pos.z;
+  const scaleFactor = THREE.MathUtils.clamp(1 + depthDelta * stereoConfig.penScaleSpeed, 0.35, 3.5);
+  currentObject.scale.copy(penGrabStartScale).multiplyScalar(scaleFactor);
+}
+
+function applyPenManipulation() {
+  if (!isStereoInteractive() || !currentObject) {
+    resetPenInteractionState();
+    return;
+  }
+
+  const pen = stereoTrackingData?.pen;
+  const penPressed = Number(stereoTrackingData?.penKey || 0) > 0;
+
+  if (!pen || !pen.pos) {
+    resetPenInteractionState();
+    return;
+  }
+
+  if (!penPressed) {
+    if (isPenGrabbingModel || wasPenPressed) {
+      setStatus("裸眼 3D 笔追已松开");
+    }
+    resetPenInteractionState();
+    return;
+  }
+
+  if (!wasPenPressed) {
+    wasPenPressed = true;
+    lastPenPose = {
+      x: pen.pos.x,
+      y: pen.pos.y,
+      z: pen.pos.z
+    };
+    if (!beginPenGrab(pen)) {
+      setStatus("笔已按下：请用射线命中模型后再抓取");
+    }
+  }
+
+  if (isPenGrabbingModel) {
+    updatePenGrab(pen);
+  }
+
+  lastPenPose = {
+    x: pen.pos.x,
+    y: pen.pos.y,
+    z: pen.pos.z
+  };
+  wasPenPressed = true;
 }
 
 function updateStereoTrackedCamera() {
@@ -884,15 +1248,20 @@ function updateStereoTrackedCamera() {
   }
 
   const eyePos = stereoTrackingData?.eye?.pos;
-  camera.position.copy(stereoBaseCameraPosition);
+  stereoCamera.position.copy(stereoBaseCameraPosition);
 
   if (eyePos) {
-    camera.position.x += eyePos.x * stereoConfig.trackingScale;
-    camera.position.y += eyePos.y * stereoConfig.trackingScale;
-    camera.position.z += -eyePos.z * stereoConfig.trackingScale;
+    const targetEyeOffset = new THREE.Vector3(
+      eyePos.x * stereoConfig.trackingScaleX,
+      eyePos.y * stereoConfig.trackingScaleY,
+      -eyePos.z * stereoConfig.trackingScaleZ
+    ).multiplyScalar(stereoConfig.trackingScale);
+
+    smoothedEyeOffset.lerp(targetEyeOffset, stereoConfig.trackingSmoothing);
   }
 
-  camera.lookAt(stereoBaseTarget);
+  stereoCamera.position.add(smoothedEyeOffset);
+  stereoCamera.lookAt(stereoBaseTarget);
 }
 
 function applyStereoCameraFrustum(targetCamera) {
@@ -926,6 +1295,8 @@ function syncStereoRuntimeParams() {
     return;
   }
 
+  const activeCamera = isStereoDisplayActive ? stereoCamera : camera;
+
   if (typeof runtimeModule._setScreenParams === "function") {
     runtimeModule._setScreenParams(
       stereoConfig.screenWidth,
@@ -935,7 +1306,7 @@ function syncStereoRuntimeParams() {
   }
 
   if (typeof runtimeModule._setCameraParams === "function") {
-    runtimeModule._setCameraParams(camera.near, camera.far);
+    runtimeModule._setCameraParams(activeCamera.near, activeCamera.far);
   }
 }
 
@@ -1011,8 +1382,19 @@ function handleResize() {
   const height = Math.max(viewerHost.clientHeight, 1);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+  stereoCamera.aspect = width / height;
+  stereoCamera.updateProjectionMatrix();
   renderer.setSize(width, height);
   stereoEffect?.setSize(width, height);
+  syncStereoRuntimeParams();
+}
+
+function handleControlsChange() {
+  if (isStereoDisplayActive) {
+    return;
+  }
+
+  captureStereoReferenceCamera();
   syncStereoRuntimeParams();
 }
 
@@ -1026,6 +1408,8 @@ function animate() {
 
   if (isStereoDisplayActive) {
     updateStereoTrackedCamera();
+    updateStylusRay();
+    applyPenManipulation();
     syncStereoRuntimeParams();
   }
 
@@ -1034,7 +1418,7 @@ function animate() {
   }
 
   if (isStereoDisplayActive && stereoEffect && document.fullscreenElement === viewerShell) {
-    stereoEffect.render(scene, camera);
+    stereoEffect.render(scene, stereoCamera);
   } else {
     renderer.render(scene, camera);
   }

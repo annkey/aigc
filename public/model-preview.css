@@ -172,6 +172,11 @@ select {
   border-color: rgba(171, 67, 23, 0.28);
 }
 
+.ghost-btn.stereo-live {
+  background: linear-gradient(135deg, rgba(86, 167, 102, 0.22), rgba(28, 118, 65, 0.2));
+  border-color: rgba(28, 118, 65, 0.32);
+}
+
 .wide {
   grid-column: 1 / -1;
 }
@@ -186,6 +191,61 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.stereo-panel {
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 251, 245, 0.95), rgba(255, 243, 232, 0.92));
+}
+
+.stereo-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stereo-panel h2 {
+  margin: -4px 0 0;
+  font-size: 18px;
+}
+
+.device-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.device-badge.online {
+  color: #175b31;
+  background: rgba(78, 163, 94, 0.16);
+  border-color: rgba(23, 91, 49, 0.16);
+}
+
+.device-badge.ready {
+  color: #0f5d68;
+  background: rgba(44, 155, 170, 0.18);
+  border-color: rgba(15, 93, 104, 0.18);
+}
+
+.device-badge.offline {
+  color: #7a5c4b;
+  background: rgba(122, 92, 75, 0.12);
+  border-color: rgba(122, 92, 75, 0.14);
+}
+
+.stereo-status-detail {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
 }
 
 .info-card {
@@ -285,6 +345,10 @@ select {
   backdrop-filter: blur(12px);
   color: var(--text);
   word-break: break-word;
+}
+
+.viewer-shell.fullscreen-active .viewer-overlay {
+  display: none;
 }
 
 @media (max-width: 980px) {
