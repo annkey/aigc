@@ -114,6 +114,7 @@ body {
 .metric-item:nth-child(6) { order: 2; }
 .metric-item:nth-child(7) { order: 7; }
 .metric-item:nth-child(8) { order: 8; }
+.metric-item:nth-child(9) { order: 9; }
 
 .metric-item {
   display: grid;
@@ -231,6 +232,26 @@ body {
   max-width: 176px;
 }
 
+.tool-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tool-range input[type="range"] {
+  width: 96px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .viewer-shell.fullscreen-active .hud {
   display: none;
 }
@@ -245,6 +266,19 @@ body {
   background: rgba(37, 99, 235, 0.08);
   border-color: rgba(37, 99, 235, 0.18);
   color: var(--accent-dark);
+}
+
+.tool-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  box-shadow: none;
+}
+
+.tool-btn:disabled:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(15, 23, 42, 0.08);
+  color: var(--muted);
 }
 
 .tool-btn::after {

@@ -22,6 +22,9 @@ const resetCameraButton = document.getElementById("reset-camera");
 const autoRotateButton = document.getElementById("toggle-autorotate");
 const wireframeButton = document.getElementById("toggle-wireframe");
 const gridButton = document.getElementById("toggle-grid");
+const explodeButton = document.getElementById("toggle-explode");
+const explodeStrengthWrap = document.getElementById("explode-strength-wrap");
+const explodeStrengthInput = document.getElementById("explode-strength");
 const stereoButton = document.getElementById("toggle-stereo-3d");
 const fullscreenButton = document.getElementById("toggle-fullscreen");
 const exportButton = document.getElementById("export-image");
@@ -36,6 +39,7 @@ const statusText = document.getElementById("status-text");
 const fileCount = document.getElementById("file-count");
 const formatStat = document.getElementById("format-stat");
 const meshStat = document.getElementById("mesh-stat");
+const partStat = document.getElementById("part-stat");
 const triangleStat = document.getElementById("triangle-stat");
 const vertexStat = document.getElementById("vertex-stat");
 const animationStat = document.getElementById("animation-stat");
@@ -46,6 +50,7 @@ const modelMeta = document.getElementById("model-meta");
 const viewerHost = document.getElementById("viewer");
 const viewerShell = document.getElementById("viewer-shell");
 const metricsCard = document.querySelector(".metrics-card");
+const meshMetric = document.getElementById("mesh-metric");
 const generatorModal = document.getElementById("generator-modal");
 const modelListModal = document.getElementById("model-list-modal");
 const generatorForm = document.getElementById("generator-form");
@@ -181,8 +186,28 @@ let modelLoadRequestId = 0;
 let activePlaybackLoadingTaskId = "";
 let playbackLoadTimeoutId = null;
 let currentModelFileSizeBytes = 0;
+let explodeParts = [];
+let explodeProgress = 0;
+let explodeTarget = 0;
+let explodeMode = "none";
+let explodeIntensity = 0.65;
+let selectedExplodePart = null;
+let selectedExplodeSourceMaterials = null;
+const pointerSelectionRaycaster = new THREE.Raycaster();
+const pointerSelectionCoords = new THREE.Vector2();
+let pointerDownScreen = null;
+let isDraggingSelectedPart = false;
+let draggingExplodePart = null;
+let suppressNextViewerClick = false;
+let selectedPartDragStartScreen = null;
+const selectedPartDragStartOffsetWorld = new THREE.Vector3();
+const selectedPartDragCameraRight = new THREE.Vector3();
+const selectedPartDragCameraUp = new THREE.Vector3();
+const selectedPartDragPullDirection = new THREE.Vector3();
 
 const MODEL_PLAYBACK_TIMEOUT_MS = 120000;
+const EXPLODE_DISTANCE_SCALE = 0.32;
+const EXPLODE_ANIMATION_SPEED = 8;
 
 const animationClock = new THREE.Clock();
 
@@ -263,6 +288,8 @@ async function bootstrap() {
   autoRotateButton.addEventListener("click", toggleAutoRotate);
   wireframeButton.addEventListener("click", toggleWireframe);
   gridButton.addEventListener("click", toggleGrid);
+  explodeButton?.addEventListener("click", toggleExplodedView);
+  explodeStrengthInput?.addEventListener("input", handleExplodeStrengthInput);
   stereoButton.addEventListener("click", toggleStereoMode);
   fullscreenButton.addEventListener("click", () => void toggleFullscreen());
   exportButton.addEventListener("click", exportPng);
@@ -302,6 +329,7 @@ async function bootstrap() {
   renderer.domElement.addEventListener("pointerdown", handleViewerPointerDown);
   renderer.domElement.addEventListener("pointermove", handleViewerPointerMove);
   renderer.domElement.addEventListener("pointerup", handleViewerPointerUp);
+  renderer.domElement.addEventListener("click", handleViewerClick);
   renderer.domElement.addEventListener("pointercancel", handleViewerPointerUp);
   renderer.domElement.addEventListener("lostpointercapture", handleViewerPointerUp);
   window.addEventListener("kmax-module-ready", () => {
@@ -329,6 +357,7 @@ async function bootstrap() {
   loadGeneratedTasks();
   applyTheme(themeSelect.value);
   updateLightStrength(Number(lightRange.value || 1.4));
+  explodeIntensity = THREE.MathUtils.clamp(Number(explodeStrengthInput?.value || 65) / 100, 0, 1);
   controls.addEventListener("change", handleControlsChange);
   handleResize();
   animate();
@@ -340,6 +369,8 @@ async function bootstrap() {
   updateAutoRotateButton();
   updateWireframeButton();
   updateGridButton();
+  updateExplodeButton();
+  updateExplodeStrengthVisibility();
   updateStereoButton();
   updateFullscreenButton();
   updateTaskProgressOverlay(null);
@@ -1490,11 +1521,15 @@ function playAnimations(animations) {
 }
 
 function clearCurrentObject() {
+  resetExplodedView(true);
+  clearSelectedExplodePart();
+
   if (!currentObject) {
     animationMixer = null;
     currentObjectSource = "local";
     currentRemoteModelUrl = "";
     currentModelFileSizeBytes = 0;
+    updateExplodeButton();
     return;
   }
 
@@ -1506,6 +1541,7 @@ function clearCurrentObject() {
   currentRemoteModelUrl = "";
   currentModelFileSizeBytes = 0;
   resetStereoSceneFit();
+  updateExplodeButton();
 }
 
 function beginModelLoadRequest() {
@@ -1645,6 +1681,300 @@ function frameObject(object) {
   controls.update();
   syncStereoRuntimeParams();
   captureStereoReferenceCamera();
+}
+
+function collectExplodableParts(object) {
+  if (!object) {
+    return [];
+  }
+
+  const rootBox = new THREE.Box3().setFromObject(object);
+  if (rootBox.isEmpty()) {
+    return [];
+  }
+
+  const rootCenter = rootBox.getCenter(new THREE.Vector3());
+  const rootSize = rootBox.getSize(new THREE.Vector3());
+  const fallbackDistance = Math.max(rootSize.length() * 0.06, 0.035);
+  const meshes = [];
+
+  object.traverse((child) => {
+    if (child.isMesh) {
+      meshes.push(child);
+    }
+  });
+
+  return meshes
+    .map((mesh, index) => {
+      const meshBox = new THREE.Box3().setFromObject(mesh);
+      if (meshBox.isEmpty()) {
+        return null;
+      }
+
+      const meshCenter = meshBox.getCenter(new THREE.Vector3());
+      const meshSize = meshBox.getSize(new THREE.Vector3());
+      const directionWorld = meshCenter.clone().sub(rootCenter);
+
+      if (directionWorld.lengthSq() < 1e-8) {
+        const angle = (index / Math.max(meshes.length, 1)) * Math.PI * 2;
+        directionWorld.set(Math.cos(angle), index % 2 === 0 ? 0.2 : -0.2, Math.sin(angle));
+      }
+
+      directionWorld.normalize();
+
+      const parentWorldQuaternion = mesh.parent
+        ? mesh.parent.getWorldQuaternion(new THREE.Quaternion())
+        : new THREE.Quaternion();
+      const directionLocal = directionWorld.applyQuaternion(parentWorldQuaternion.invert()).normalize();
+      const distance = Math.max(meshSize.length() * EXPLODE_DISTANCE_SCALE, fallbackDistance);
+
+      return {
+        id: mesh.uuid,
+        object: mesh,
+        basePosition: mesh.position.clone(),
+        direction: directionLocal,
+        distance,
+        dragOffset: new THREE.Vector3()
+      };
+    })
+    .filter(Boolean);
+}
+
+function syncExplodeParts() {
+  explodeParts = collectExplodableParts(currentObject);
+  if (explodeParts.length <= 1) {
+    explodeMode = "none";
+    explodeTarget = 0;
+    explodeProgress = 0;
+  }
+  applyExplodedLayout();
+  updateExplodeButton();
+  updateExplodeStrengthVisibility();
+}
+
+function applyExplodedLayout() {
+  for (const part of explodeParts) {
+    let factor = 0;
+
+    if (explodeMode === "all") {
+      factor = explodeProgress * explodeIntensity;
+    } else if (explodeMode === "single" && selectedExplodePart?.id === part.id) {
+      factor = explodeProgress * explodeIntensity * 1.2;
+    }
+
+    part.object.position
+      .copy(part.basePosition)
+      .addScaledVector(part.direction, part.distance * factor)
+      .add(part.dragOffset);
+  }
+
+  currentObject?.updateMatrixWorld(true);
+}
+
+function updateExplodedLayout(delta) {
+  if (!explodeParts.length && explodeProgress === explodeTarget) {
+    return;
+  }
+
+  const step = Math.min(1, delta * EXPLODE_ANIMATION_SPEED);
+  explodeProgress += (explodeTarget - explodeProgress) * step;
+
+  if (Math.abs(explodeTarget - explodeProgress) < 0.001) {
+    explodeProgress = explodeTarget;
+  }
+
+  applyExplodedLayout();
+}
+
+function resetExplodedView(clearParts = false) {
+  explodeMode = "none";
+  explodeTarget = 0;
+  explodeProgress = 0;
+
+  if (explodeParts.length) {
+    for (const part of explodeParts) {
+      part.object.position.copy(part.basePosition);
+    }
+    currentObject?.updateMatrixWorld(true);
+  }
+
+  if (clearParts) {
+    explodeParts = [];
+  }
+
+  updateExplodeButton();
+  updateExplodeStrengthVisibility();
+}
+
+function countExplodableParts(object) {
+  return collectExplodableParts(object).length;
+}
+
+function handleExplodeStrengthInput() {
+  explodeIntensity = THREE.MathUtils.clamp(Number(explodeStrengthInput?.value || 65) / 100, 0, 1);
+  applyExplodedLayout();
+
+  if (explodeMode === "all") {
+    setStatus(`爆炸强度已调整为 ${Math.round(explodeIntensity * 100)}%`);
+  } else if (explodeMode === "single" && selectedExplodePart) {
+    setStatus(`子结构展开强度已调整为 ${Math.round(explodeIntensity * 100)}%`);
+  }
+}
+
+function updateExplodeStrengthVisibility() {
+  explodeStrengthWrap?.classList.toggle("hidden", !currentObject || explodeParts.length <= 1);
+}
+
+function resetExplodePartDragOffset(part) {
+  part?.dragOffset?.set(0, 0, 0);
+}
+
+function stopSelectedPartDrag() {
+  if (!isDraggingSelectedPart) {
+    return;
+  }
+
+  isDraggingSelectedPart = false;
+  draggingExplodePart = null;
+  selectedPartDragStartScreen = null;
+  controls.enabled = true;
+}
+
+function clearSelectedExplodePart() {
+  stopSelectedPartDrag();
+
+  if (!selectedExplodePart) {
+    return;
+  }
+
+  resetExplodePartDragOffset(selectedExplodePart);
+
+  if (selectedExplodeSourceMaterials) {
+    selectedExplodePart.object.material = selectedExplodeSourceMaterials;
+  }
+
+  selectedExplodePart = null;
+  selectedExplodeSourceMaterials = null;
+  applyExplodedLayout();
+}
+
+function highlightExplodePart(part) {
+  if (!part?.object) {
+    return;
+  }
+
+  clearSelectedExplodePart();
+  selectedExplodePart = part;
+  selectedExplodeSourceMaterials = part.object.material;
+
+  const sourceMaterials = Array.isArray(part.object.material) ? part.object.material : [part.object.material];
+  const highlightedMaterials = sourceMaterials.map((material) => {
+    const clone = material?.clone?.() || material;
+
+    if ("emissive" in clone && clone.emissive?.setHex) {
+      clone.emissive.setHex(0x2563eb);
+      clone.emissiveIntensity = Math.max(0.45, Number(clone.emissiveIntensity) || 0.45);
+    } else if ("color" in clone && clone.color?.offsetHSL) {
+      clone.color = clone.color.clone();
+      clone.color.offsetHSL(0.01, 0.18, 0.08);
+    }
+
+    return clone;
+  });
+
+  part.object.material = Array.isArray(part.object.material) ? highlightedMaterials : highlightedMaterials[0];
+}
+
+function findExplodePartByMesh(mesh) {
+  if (!mesh) {
+    return null;
+  }
+
+  return explodeParts.find((part) => part.object === mesh) || null;
+}
+
+function pickExplodePartFromPointer(event) {
+  if (!currentObject || !explodeParts.length) {
+    return null;
+  }
+
+  if (!updatePointerSelectionRay(event, camera)) {
+    return null;
+  }
+
+  const hits = pointerSelectionRaycaster.intersectObjects(getCurrentModelMeshes(), false);
+  if (!hits.length) {
+    return null;
+  }
+
+  return findExplodePartByMesh(hits[0].object);
+}
+
+function getPrimaryCamera() {
+  return isStereoInteractive() ? stereoCamera : camera;
+}
+
+function updatePointerSelectionRay(event, activeCamera = getPrimaryCamera()) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return false;
+  }
+
+  pointerSelectionCoords.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerSelectionCoords.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  pointerSelectionRaycaster.setFromCamera(pointerSelectionCoords, activeCamera);
+  return true;
+}
+
+function beginSelectedPartDrag(event) {
+  if (isStereoInteractive() || event.button !== 0 || !selectedExplodePart) {
+    return false;
+  }
+
+  const pickedPart = pickExplodePartFromPointer(event);
+  if (!pickedPart || pickedPart.id !== selectedExplodePart.id) {
+    return false;
+  }
+
+  selectedPartDragStartScreen = { x: event.clientX, y: event.clientY };
+  const parentQuaternion = selectedExplodePart.object.parent
+    ? selectedExplodePart.object.parent.getWorldQuaternion(new THREE.Quaternion())
+    : new THREE.Quaternion();
+  selectedPartDragStartOffsetWorld.copy(selectedExplodePart.dragOffset).applyQuaternion(parentQuaternion);
+  camera.matrixWorld.extractBasis(selectedPartDragCameraRight, selectedPartDragCameraUp, new THREE.Vector3());
+  selectedPartDragCameraRight.normalize();
+  selectedPartDragCameraUp.normalize();
+  selectedPartDragPullDirection.copy(selectedExplodePart.direction).applyQuaternion(parentQuaternion).normalize();
+  isDraggingSelectedPart = true;
+  draggingExplodePart = selectedExplodePart;
+  controls.enabled = false;
+  renderer.domElement.setPointerCapture?.(event.pointerId);
+  setStatus("已进入子结构拖拽观察，向上拖可拉出，左右可微调");
+  return true;
+}
+
+function updateSelectedPartDrag(event) {
+  if (!isDraggingSelectedPart || !draggingExplodePart || !selectedPartDragStartScreen) {
+    return false;
+  }
+
+  const deltaX = event.clientX - selectedPartDragStartScreen.x;
+  const deltaY = event.clientY - selectedPartDragStartScreen.y;
+  const pullStrength = Math.max(draggingExplodePart.distance * 0.02, 0.01);
+  const screenAdjustStrength = Math.max(draggingExplodePart.distance * 0.0045, 0.0025);
+  const worldOffset = selectedPartDragStartOffsetWorld.clone()
+    .addScaledVector(selectedPartDragPullDirection, Math.max(0, -deltaY) * pullStrength)
+    .addScaledVector(selectedPartDragCameraRight, deltaX * screenAdjustStrength)
+    .addScaledVector(selectedPartDragCameraUp, -deltaY * screenAdjustStrength * 0.4);
+
+  const parentQuaternion = draggingExplodePart.object.parent
+    ? draggingExplodePart.object.parent.getWorldQuaternion(new THREE.Quaternion())
+    : new THREE.Quaternion();
+  const localOffset = worldOffset.applyQuaternion(parentQuaternion.invert());
+
+  draggingExplodePart.dragOffset.copy(localOffset);
+  applyExplodedLayout();
+  return true;
 }
 
 function updateFileList(files) {
@@ -1800,6 +2130,7 @@ function setMetricsVisibility(visible) {
 
 function updateModelStats(fileName, animationCount) {
   const meshCount = countMeshes(currentObject);
+  const partCount = countExplodableParts(currentObject);
   const { triangles, vertices } = countGeometryStats(currentObject);
   const size = getObjectSize(currentObject);
   const localEntryFile = resourceMap.get(fileName);
@@ -1812,6 +2143,7 @@ function updateModelStats(fileName, animationCount) {
   setText(formatStat, getExtension(fileName).toUpperCase() || "-");
 
   setText(meshStat, formatNumber(meshCount));
+  setText(partStat, formatNumber(partCount));
   setText(triangleStat, formatNumber(triangles));
   setText(vertexStat, formatNumber(vertices));
   setText(animationStat, String(animationCount));
@@ -1826,19 +2158,24 @@ function updateModelStats(fileName, animationCount) {
     openedAt: new Date().toLocaleString()
   });
 
-  modelMeta.textContent = `文件：${fileName} | 网格：${formatNumber(meshCount)} | 三角面：${formatNumber(triangles)}`;
+  meshMetric?.classList.add("hidden");
+  modelMeta.textContent = `文件：${fileName} | 子结构：${formatNumber(partCount)} | 三角面：${formatNumber(triangles)}`;
+  syncExplodeParts();
 }
 
 function resetStats() {
   setMetricsVisibility(false);
+  meshMetric?.classList.add("hidden");
   setText(fileCount, "0");
   setText(formatStat, "-");
   setText(meshStat, "-");
+  setText(partStat, "-");
   setText(triangleStat, "-");
   setText(vertexStat, "-");
   setText(animationStat, "0");
   setText(fileSizeStat, "-");
   setText(sizeStat, "-");
+  updateExplodeStrengthVisibility();
 }
 
 function countMeshes(object) {
@@ -1936,6 +2273,64 @@ function toggleGrid() {
 function updateGridButton() {
   gridButton.classList.toggle("active", isGridVisible);
   setToolLabel(gridButton, `地面网格：${isGridVisible ? "开" : "关"}`);
+}
+
+function toggleExplodedView() {
+  if (!currentObject) {
+    setStatus("请先加载模型");
+    return;
+  }
+
+  if (!explodeParts.length) {
+    syncExplodeParts();
+  }
+
+  if (explodeParts.length <= 1) {
+    clearSelectedExplodePart();
+    explodeMode = "none";
+    explodeTarget = 0;
+    updateExplodeButton();
+    setStatus("当前模型只识别到 1 个可独立子结构，通常是源文件已经合并为单一网格");
+    return;
+  }
+
+  const shouldEnable = explodeMode !== "all" || explodeTarget === 0;
+  clearSelectedExplodePart();
+  explodeMode = shouldEnable ? "all" : "none";
+  explodeTarget = shouldEnable ? 1 : 0;
+  updateExplodeButton();
+  setStatus(shouldEnable ? `爆炸视图已开启，共识别 ${explodeParts.length} 个子结构` : "爆炸视图已恢复");
+}
+
+function updateExplodeButton() {
+  if (!explodeButton) {
+    return;
+  }
+
+  const hasModel = Boolean(currentObject);
+  const available = explodeParts.length > 1;
+  const active = explodeMode === "all" && (explodeTarget > 0 || explodeProgress > 0.01);
+  const singleSelected = explodeMode === "single" && selectedExplodePart;
+
+  explodeButton.disabled = !hasModel;
+  explodeButton.classList.toggle("active", active);
+
+  if (!hasModel) {
+    setToolLabel(explodeButton, "爆炸视图：未加载模型");
+    return;
+  }
+
+  if (!available) {
+    setToolLabel(explodeButton, "爆炸视图：当前模型无可展开子结构");
+    return;
+  }
+
+  if (singleSelected) {
+    setToolLabel(explodeButton, "爆炸视图：当前为单独展开");
+    return;
+  }
+
+  setToolLabel(explodeButton, `爆炸视图：${active ? "开" : "关"}`);
 }
 
 function toggleStereoMode() {
@@ -2134,6 +2529,13 @@ function isStereoInteractive() {
 }
 
 function handleViewerPointerDown(event) {
+  pointerDownScreen = { x: event.clientX, y: event.clientY };
+
+  if (beginSelectedPartDrag(event)) {
+    suppressNextViewerClick = true;
+    return;
+  }
+
   if (!isStereoInteractive() || event.button !== 0) {
     return;
   }
@@ -2147,6 +2549,10 @@ function handleViewerPointerDown(event) {
 }
 
 function handleViewerPointerMove(event) {
+  if (updateSelectedPartDrag(event)) {
+    return;
+  }
+
   if (!isPointerModelRotating || activePointerId !== event.pointerId || !currentObject) {
     return;
   }
@@ -2165,12 +2571,67 @@ function handleViewerPointerMove(event) {
 }
 
 function handleViewerPointerUp(event) {
+  if (isDraggingSelectedPart) {
+    stopSelectedPartDrag();
+    return;
+  }
+
   if (activePointerId !== null && event.pointerId !== undefined && activePointerId !== event.pointerId) {
     return;
   }
 
   isPointerModelRotating = false;
   activePointerId = null;
+}
+
+function handleViewerClick(event) {
+  if (isStereoInteractive() || !currentObject) {
+    return;
+  }
+
+  if (suppressNextViewerClick) {
+    suppressNextViewerClick = false;
+    return;
+  }
+
+  if (pointerDownScreen) {
+    const moved = Math.hypot(event.clientX - pointerDownScreen.x, event.clientY - pointerDownScreen.y);
+    pointerDownScreen = null;
+    if (moved > 6) {
+      return;
+    }
+  }
+
+  const pickedPart = pickExplodePartFromPointer(event);
+
+  if (!pickedPart) {
+    if (selectedExplodePart) {
+      clearSelectedExplodePart();
+      if (explodeMode === "single") {
+        explodeMode = "none";
+        explodeTarget = 0;
+      }
+      updateExplodeButton();
+      setStatus("已取消子结构选择");
+    }
+    return;
+  }
+
+  const isSamePart = selectedExplodePart?.id === pickedPart.id;
+  if (isSamePart && explodeMode === "single") {
+    clearSelectedExplodePart();
+    explodeMode = "none";
+    explodeTarget = 0;
+    updateExplodeButton();
+    setStatus("已恢复整体视图");
+    return;
+  }
+
+  highlightExplodePart(pickedPart);
+  explodeMode = "single";
+  explodeTarget = 1;
+  updateExplodeButton();
+  setStatus(`已选中子结构，单独展开已开启`);
 }
 
 function resetPenInteractionState() {
@@ -2505,6 +2966,8 @@ function animate() {
   if (animationMixer) {
     animationMixer.update(delta);
   }
+
+  updateExplodedLayout(delta);
 
   if (isStereoDisplayActive) {
     updateStereoTrackedCamera();

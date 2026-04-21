@@ -22,9 +22,13 @@
                 <span>格式</span>
                 <strong id="format-stat">-</strong>
               </div>
-              <div class="metric-item">
+              <div id="mesh-metric" class="metric-item hidden">
                 <span>网格数</span>
                 <strong id="mesh-stat">-</strong>
+              </div>
+              <div class="metric-item">
+                <span>子结构数</span>
+                <strong id="part-stat">-</strong>
               </div>
               <div class="metric-item">
                 <span>三角面</span>
@@ -81,6 +85,13 @@
             <button id="toggle-grid" class="tool-btn" type="button" data-label="地面网格" title="地面网格">
               <span aria-hidden="true">&#9642;</span>
             </button>
+            <button id="toggle-explode" class="tool-btn" type="button" data-label="爆炸视图" title="爆炸视图">
+              <span aria-hidden="true">&#10531;</span>
+            </button>
+            <label id="explode-strength-wrap" class="tool-range hidden" for="explode-strength" title="爆炸强度">
+              <span>爆炸</span>
+              <input id="explode-strength" type="range" min="0" max="100" step="1" value="65" />
+            </label>
             <select id="submodel-select" class="tool-select tool-select-wide hidden" title="子模型文件" aria-label="子模型文件">
               <option value="">主模型文件</option>
             </select>
