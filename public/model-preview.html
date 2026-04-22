@@ -88,6 +88,9 @@
             <button id="toggle-explode" class="tool-btn" type="button" data-label="爆炸视图" title="爆炸视图">
               <span aria-hidden="true">&#10531;</span>
             </button>
+            <label id="panorama-trigger" class="tool-btn tool-btn-upload hidden" for="panorama-file" data-label="上传全景图" title="上传全景图">
+              <span aria-hidden="true">&#127749;</span>
+            </label>
             <label id="explode-strength-wrap" class="tool-range hidden" for="explode-strength" title="爆炸强度">
               <span>爆炸</span>
               <input id="explode-strength" type="range" min="0" max="100" step="1" value="65" />
@@ -99,6 +102,8 @@
               <option value="warm">暖光工作台</option>
               <option value="studio" selected>明亮摄影棚</option>
               <option value="dark">深色展示台</option>
+              <option value="hologram">全息实验室</option>
+              <option value="panorama">全景天空盒</option>
             </select>
             <button id="export-image" class="tool-btn" type="button" data-label="导出 PNG" title="导出 PNG">
               <span aria-hidden="true">&#8681;</span>
@@ -208,6 +213,7 @@
             multiple
             accept=".glb,.gltf,.fbx,.obj,.stl,.bin,.mtl,.jpg,.jpeg,.png,.webp"
           />
+          <input id="panorama-file" type="file" accept="image/jpeg,image/png,image/webp" />
           <select id="entry-file" disabled>
             <option value="">请先选择模型文件</option>
           </select>

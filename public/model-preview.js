@@ -25,6 +25,8 @@ const gridButton = document.getElementById("toggle-grid");
 const explodeButton = document.getElementById("toggle-explode");
 const explodeStrengthWrap = document.getElementById("explode-strength-wrap");
 const explodeStrengthInput = document.getElementById("explode-strength");
+const panoramaTrigger = document.getElementById("panorama-trigger");
+const panoramaFileInput = document.getElementById("panorama-file");
 const stereoButton = document.getElementById("toggle-stereo-3d");
 const fullscreenButton = document.getElementById("toggle-fullscreen");
 const exportButton = document.getElementById("export-image");
@@ -177,6 +179,11 @@ let penGrabStartRotation = null;
 let penGrabHitPointLocal = null;
 let currentObjectSource = "local";
 let currentRemoteModelUrl = "";
+let currentPanoramaTexture = null;
+let currentPanoramaEnvironment = null;
+let currentPanoramaName = "";
+const DEFAULT_PANORAMA_URL = "/panoramas/default-panorama.png";
+const DEFAULT_PANORAMA_NAME = "默认天空盒";
 let apiConfig = null;
 let generatedTasks = [];
 let activeTaskPollers = new Map();
@@ -228,6 +235,8 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 viewerHost.appendChild(renderer.domElement);
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -264,6 +273,180 @@ ground.receiveShadow = true;
 ground.visible = true;
 previewRoot.add(ground);
 
+const panoramaShadowMaterial = new THREE.ShadowMaterial({
+  color: 0x000000,
+  transparent: true,
+  opacity: 0.24
+});
+const panoramaShadow = new THREE.Mesh(new THREE.CircleGeometry(1, 64), panoramaShadowMaterial);
+panoramaShadow.rotation.x = -Math.PI / 2;
+panoramaShadow.position.y = -0.003;
+panoramaShadow.receiveShadow = true;
+panoramaShadow.visible = false;
+previewRoot.add(panoramaShadow);
+
+let activeThemeKey = "studio";
+
+const THEME_SETTINGS = {
+  studio: {
+    shellClass: "theme-studio",
+    background: 0xe8ecef,
+    fogNear: 20,
+    fogFar: 50,
+    ground: 0xe7eaee,
+    gridCenter: 0xcad4dd,
+    gridLine: 0xe3e9ef,
+    hemiSky: 0xf7fbff,
+    hemiGround: 0xb7c5d4,
+    keyColor: 0xffffff,
+    fillColor: 0xdce7f3,
+    keyIntensity: 1.05,
+    fillIntensity: 0.56
+  },
+  warm: {
+    shellClass: "theme-warm",
+    background: 0xf7efe4,
+    fogNear: 18,
+    fogFar: 44,
+    ground: 0xf4ece1,
+    gridCenter: 0xd7b08f,
+    gridLine: 0xe7d6c7,
+    hemiSky: 0xfff4dd,
+    hemiGround: 0xc98f66,
+    keyColor: 0xffffff,
+    fillColor: 0xffd9bf,
+    keyIntensity: 1.02,
+    fillIntensity: 0.54
+  },
+  dark: {
+    shellClass: "theme-dark",
+    background: 0x20242b,
+    fogNear: 20,
+    fogFar: 55,
+    ground: 0x323843,
+    gridCenter: 0x506070,
+    gridLine: 0x2d3641,
+    hemiSky: 0x9caec2,
+    hemiGround: 0x1f2937,
+    keyColor: 0xd8e2f0,
+    fillColor: 0x64748b,
+    keyIntensity: 0.92,
+    fillIntensity: 0.46,
+    metricsTone: "light"
+  },
+  cyber: {
+    shellClass: "theme-cyber",
+    background: 0x08121d,
+    fogNear: 18,
+    fogFar: 48,
+    ground: 0x071b26,
+    gridCenter: 0x00d6ff,
+    gridLine: 0x11344f,
+    hemiSky: 0x79f0ff,
+    hemiGround: 0x041829,
+    keyColor: 0x8defff,
+    fillColor: 0x355dff,
+    keyIntensity: 1.95,
+    fillIntensity: 1.15,
+    metricsTone: "light"
+  },
+  hologram: {
+    shellClass: "theme-hologram",
+    background: 0xe8f8ff,
+    fogNear: 18,
+    fogFar: 46,
+    ground: 0xdff3fb,
+    gridCenter: 0x7bd2ff,
+    gridLine: 0xc9ecff,
+    hemiSky: 0xf7feff,
+    hemiGround: 0x80b9d9,
+    keyColor: 0xffffff,
+    fillColor: 0x80d8ff,
+    keyIntensity: 0.98,
+    fillIntensity: 0.54
+  },
+  blueprint: {
+    shellClass: "theme-blueprint",
+    background: 0x102139,
+    fogNear: 20,
+    fogFar: 52,
+    ground: 0x122a47,
+    gridCenter: 0x89c4ff,
+    gridLine: 0x244b76,
+    hemiSky: 0xb8dfff,
+    hemiGround: 0x0f2038,
+    keyColor: 0xc7e2ff,
+    fillColor: 0x4d89cb,
+    keyIntensity: 1.88,
+    fillIntensity: 1,
+    metricsTone: "light"
+  },
+  sunset: {
+    shellClass: "theme-sunset",
+    background: 0x3c2644,
+    fogNear: 18,
+    fogFar: 46,
+    ground: 0x473248,
+    gridCenter: 0xffc176,
+    gridLine: 0x7f4e63,
+    hemiSky: 0xffd2a3,
+    hemiGround: 0x56344d,
+    keyColor: 0xffe0b6,
+    fillColor: 0xff8f70,
+    keyIntensity: 1.78,
+    fillIntensity: 1.02,
+    metricsTone: "light"
+  },
+  forest: {
+    shellClass: "theme-forest",
+    background: 0x233a31,
+    fogNear: 18,
+    fogFar: 48,
+    ground: 0x30453b,
+    gridCenter: 0x8cbf87,
+    gridLine: 0x405f4f,
+    hemiSky: 0xdff0ce,
+    hemiGround: 0x33483e,
+    keyColor: 0xf1f5cf,
+    fillColor: 0x6faa7e,
+    keyIntensity: 1.7,
+    fillIntensity: 0.98,
+    metricsTone: "light"
+  },
+  museum: {
+    shellClass: "theme-museum",
+    background: 0x2f271f,
+    fogNear: 18,
+    fogFar: 46,
+    ground: 0x3d3228,
+    gridCenter: 0xdab178,
+    gridLine: 0x6a5740,
+    hemiSky: 0xf8e1c3,
+    hemiGround: 0x5a4535,
+    keyColor: 0xffefd2,
+    fillColor: 0xc49b68,
+    keyIntensity: 1.74,
+    fillIntensity: 0.96,
+    metricsTone: "light"
+  },
+  panorama: {
+    shellClass: "theme-panorama",
+    background: 0x0f172a,
+    fogNear: 24,
+    fogFar: 72,
+    ground: 0x172033,
+    gridCenter: 0xaec3da,
+    gridLine: 0x415268,
+    hemiSky: 0xffffff,
+    hemiGround: 0x415268,
+    keyColor: 0xffffff,
+    fillColor: 0xaec3da,
+    keyIntensity: 0.84,
+    fillIntensity: 0.42,
+    metricsTone: "light"
+  }
+};
+
 bootstrap();
 
 async function bootstrap() {
@@ -274,15 +457,31 @@ async function bootstrap() {
   stylusRaycaster = new KStylusRaycaster(scene);
   stylusRaycaster.line.visible = false;
   stylusRaycaster.helper.visible = false;
+  if (panoramaTrigger) {
+    panoramaTrigger.dataset.label = "上传全景图";
+    panoramaTrigger.title = "上传全景图";
+    themeSelect?.insertAdjacentElement("afterend", panoramaTrigger);
+  }
 
   fileInput.addEventListener("change", (event) => applySelectedFiles(Array.from(event.target.files || [])));
+  panoramaFileInput?.addEventListener("change", () => {
+    const file = panoramaFileInput.files?.[0];
+    if (file) {
+      void handlePanoramaSelected(file);
+    }
+  });
   entryFileSelect.addEventListener("change", () => {
     highlightSelectedEntry();
     if (entryFileSelect.value) {
       void handleLoadModel();
     }
   });
-  themeSelect.addEventListener("change", () => applyTheme(themeSelect.value));
+  themeSelect.addEventListener("change", async () => {
+    if (themeSelect.value === "panorama") {
+      await ensureDefaultPanoramaLoaded();
+    }
+    applyTheme(themeSelect.value);
+  });
   lightRange.addEventListener("input", () => updateLightStrength(Number(lightRange.value)));
   loadButton.addEventListener("click", () => void handleLoadModel());
   resetCameraButton.addEventListener("click", resetCameraView);
@@ -356,6 +555,9 @@ async function bootstrap() {
   setupStereoTracking();
   loadRecentEntries();
   loadGeneratedTasks();
+  if (themeSelect.value === "panorama") {
+    await ensureDefaultPanoramaLoaded();
+  }
   applyTheme(themeSelect.value);
   updateLightStrength(Number(lightRange.value || 1.4));
   explodeIntensity = THREE.MathUtils.clamp(Number(explodeStrengthInput?.value || 65) / 100, 0, 1);
@@ -2115,6 +2317,64 @@ function safeRevokeObjectUrl(url) {
   } catch {}
 }
 
+function clearPanoramaScene() {
+  if (currentPanoramaTexture) {
+    currentPanoramaTexture.dispose();
+    currentPanoramaTexture = null;
+  }
+
+  if (currentPanoramaEnvironment) {
+    currentPanoramaEnvironment.dispose();
+    currentPanoramaEnvironment = null;
+  }
+
+  scene.environment = null;
+}
+
+async function handlePanoramaSelected(file) {
+  try {
+    await loadPanoramaTexture(file);
+    if (activeThemeKey === "panorama") {
+      applyTheme("panorama");
+    }
+    updatePanoramaControls();
+    setStatus("全景天空盒已更新");
+  } catch (error) {
+    setStatus("全景图加载失败");
+    modelMeta.textContent = formatPreviewError(error);
+  }
+}
+
+async function loadPanoramaTexture(file) {
+  await loadPanoramaTextureFromSource(createObjectUrl(file), true);
+  currentPanoramaName = file.name;
+}
+
+async function loadPanoramaTextureFromUrl(url, name = "") {
+  await loadPanoramaTextureFromSource(url, false);
+  currentPanoramaName = name || DEFAULT_PANORAMA_NAME;
+}
+
+async function loadPanoramaTextureFromSource(source, revokeAfterLoad) {
+  clearPanoramaScene();
+
+  const loader = new THREE.TextureLoader();
+
+  try {
+    const texture = await loader.loadAsync(source);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+
+    const envTarget = pmremGenerator.fromEquirectangular(texture);
+    currentPanoramaTexture = texture;
+    currentPanoramaEnvironment = envTarget.texture;
+  } finally {
+    if (revokeAfterLoad) {
+      safeRevokeObjectUrl(source);
+    }
+  }
+}
+
 function setText(element, value) {
   if (element) {
     element.textContent = value;
@@ -2138,7 +2398,60 @@ function setMetricsVisibility(visible) {
   metricsCard?.classList.toggle("hidden", !visible);
 }
 
+function updatePanoramaControls() {
+  const isPanoramaTheme = activeThemeKey === "panorama";
+  panoramaTrigger?.classList.toggle("hidden", !isPanoramaTheme);
+
+  if (panoramaTrigger) {
+    const label = currentPanoramaName ? `更换全景图：${currentPanoramaName}` : "上传全景图";
+    panoramaTrigger.dataset.label = label;
+    panoramaTrigger.title = label;
+  }
+}
+
+function syncPanoramaPresentation() {
+  const isPanoramaTheme = activeThemeKey === "panorama";
+
+  ground.visible = !isPanoramaTheme;
+  grid.visible = !isPanoramaTheme && isGridVisible;
+
+  if (!currentObject) {
+    panoramaShadow.visible = false;
+    return;
+  }
+
+  const defaultY = Number(currentObject.userData.defaultPositionY ?? 0);
+  currentObject.position.y = defaultY;
+
+  if (!isPanoramaTheme) {
+    panoramaShadow.visible = false;
+    return;
+  }
+
+  const box = new THREE.Box3().setFromObject(currentObject);
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(size.x, size.z) * 0.52;
+  panoramaShadow.visible = true;
+  panoramaShadow.scale.setScalar(Math.max(radius, 0.75));
+  panoramaShadow.position.set(0, currentObject.position.y - 0.002, 0);
+}
+
+async function ensureDefaultPanoramaLoaded() {
+  if (currentPanoramaTexture) {
+    return;
+  }
+
+  try {
+    await loadPanoramaTextureFromUrl(DEFAULT_PANORAMA_URL, DEFAULT_PANORAMA_NAME);
+    updatePanoramaControls();
+  } catch {
+    currentPanoramaName = "";
+    updatePanoramaControls();
+  }
+}
+
 function updateModelStats(fileName, animationCount) {
+  currentObject.userData.defaultPositionY = Number(currentObject.position.y || 0);
   const meshCount = countMeshes(currentObject);
   const partCount = countExplodableParts(currentObject);
   const { triangles, vertices } = countGeometryStats(currentObject);
@@ -2171,6 +2484,7 @@ function updateModelStats(fileName, animationCount) {
   meshMetric?.classList.add("hidden");
   modelMeta.textContent = `文件：${fileName} | 子结构：${formatNumber(partCount)} | 三角面：${formatNumber(triangles)}`;
   syncExplodeParts();
+  syncPanoramaPresentation();
 }
 
 function resetStats() {
@@ -2186,6 +2500,7 @@ function resetStats() {
   setText(fileSizeStat, "-");
   setText(sizeStat, "-");
   updateExplodeStrengthVisibility();
+  panoramaShadow.visible = false;
 }
 
 function countMeshes(object) {
@@ -2275,8 +2590,7 @@ function applyWireframeState() {
 
 function toggleGrid() {
   isGridVisible = !isGridVisible;
-  grid.visible = isGridVisible;
-  ground.visible = isGridVisible;
+  syncPanoramaPresentation();
   updateGridButton();
 }
 
@@ -2896,34 +3210,46 @@ function exportPng() {
 }
 
 function applyTheme(theme) {
-  viewerShell.classList.remove("theme-studio", "theme-dark");
+  const settings = THEME_SETTINGS[theme] || THEME_SETTINGS.warm;
+  activeThemeKey = THEME_SETTINGS[theme] ? theme : "warm";
 
-  if (theme === "studio") {
-    viewerShell.classList.add("theme-studio");
-    scene.background = new THREE.Color(0xe8ecef);
-    scene.fog = new THREE.Fog(0xe8ecef, 20, 50);
-    groundMaterial.color.set(0xe7eaee);
-    return;
+  viewerShell.className = "viewer-shell";
+  viewerShell.classList.add(settings.shellClass);
+  viewerShell.classList.toggle("metrics-light", settings.metricsTone === "light");
+  updatePanoramaControls();
+
+  if (activeThemeKey === "panorama" && currentPanoramaTexture) {
+    scene.background = currentPanoramaTexture;
+    scene.environment = currentPanoramaEnvironment;
+    scene.fog = null;
+  } else {
+    scene.background = new THREE.Color(settings.background);
+    scene.environment = null;
+    scene.fog = new THREE.Fog(settings.background, settings.fogNear, settings.fogFar);
   }
 
-  if (theme === "dark") {
-    viewerShell.classList.add("theme-dark");
-    scene.background = new THREE.Color(0x20242b);
-    scene.fog = new THREE.Fog(0x20242b, 20, 55);
-    groundMaterial.color.set(0x323843);
-    return;
+  groundMaterial.color.set(settings.ground);
+  groundMaterial.opacity = activeThemeKey === "panorama" ? 0.72 : 0.95;
+  hemiLight.color.set(settings.hemiSky);
+  hemiLight.groundColor.set(settings.hemiGround);
+  keyLight.color.set(settings.keyColor);
+  fillLight.color.set(settings.fillColor);
+
+  if (Array.isArray(grid.material)) {
+    grid.material[0].color.set(settings.gridCenter);
+    grid.material[1].color.set(settings.gridLine);
   }
 
-  scene.background = new THREE.Color(0xf7efe4);
-  scene.fog = new THREE.Fog(0xf7efe4, 18, 44);
-  groundMaterial.color.set(0xf4ece1);
+  updateLightStrength(Number(lightRange?.value || 1.4));
+  syncPanoramaPresentation();
 }
 
 function updateLightStrength(value) {
+  const settings = THEME_SETTINGS[activeThemeKey] || THEME_SETTINGS.studio;
   lightValue.textContent = `${value.toFixed(1)}x`;
-  hemiLight.intensity = value;
-  keyLight.intensity = value * 1.15;
-  fillLight.intensity = value * 0.7;
+  hemiLight.intensity = value * 0.72;
+  keyLight.intensity = value * (settings.keyIntensity / 1.45);
+  fillLight.intensity = value * (settings.fillIntensity / 1.45);
 }
 
 function saveRecentEntry(entry) {
