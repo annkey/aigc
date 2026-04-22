@@ -94,8 +94,8 @@ const GENERATOR_PROVIDER_CONFIG = {
       { value: "detailed", label: "detailed" }
     ],
     geometryOptions: [
-      { value: "standard", label: "standard" },
-      { value: "detailed", label: "detailed" }
+      { value: "standard", label: "标准" },
+      { value: "detailed", label: "精细" }
     ],
     defaultModelVersion: "P1-20260311",
     defaultTextureQuality: "standard",
@@ -115,8 +115,8 @@ const GENERATOR_PROVIDER_CONFIG = {
       { value: "detailed", label: "PBR 贴图" }
     ],
     geometryOptions: [
-      { value: "standard", label: "standard" },
-      { value: "lowpoly", label: "lowpoly" }
+      { value: "standard", label: "标准" },
+      { value: "lowpoly", label: "低多边形" }
     ],
     defaultModelVersion: "latest",
     defaultTextureQuality: "standard",
@@ -568,7 +568,7 @@ async function handleGeneratorSubmit() {
   const providerConfig = GENERATOR_PROVIDER_CONFIG[provider];
   const mode = generatorModeSelect.value === "image" ? "image" : "text";
   const prompt = generatorPromptInput.value.trim();
-  const negativePrompt = generatorNegativePromptInput.value.trim();
+  const negativePrompt = generatorNegativePromptInput?.value.trim() || "";
   const imageFile = generatorImageInput.files?.[0] || null;
 
   if (mode === "text") {
@@ -586,7 +586,7 @@ async function handleGeneratorSubmit() {
   }
 
   generatorSubmitButton.disabled = true;
-  generatorSubmitButton.textContent = `正在提交到 ${activeConfig.providerName}...`;
+  generatorSubmitButton.textContent = "正在提交...";
   closeModal(generatorModal);
 
   dismissedTaskProgressId = "";
@@ -602,7 +602,7 @@ async function handleGeneratorSubmit() {
     progress: 2,
     finalized: false
   });
-  setStatus(`正在提交到 ${activeConfig.providerName}，请稍候...`);
+  setStatus("正在提交生成请求，请稍候...");
 
   try {
     const result = await submitGeneratorTask({
@@ -644,7 +644,7 @@ async function handleGeneratorSubmit() {
     activeGeneratingTaskId = createdTask.id;
     updateTaskProgressOverlay(createdTask);
     renderGeneratedTaskList();
-    setStatus(`已提交到 ${activeConfig.providerName}，正在等待模型生成`);
+    setStatus("已提交生成请求，正在等待模型生成");
     await pollGeneratedTask(createdTask.id, provider);
   } catch (error) {
     clearTaskProgressOverlay();
@@ -797,13 +797,12 @@ function renderGeneratedTaskMarkup(task) {
       <div class="model-list-top">
         <div class="model-list-title">
           <strong>${escapeHtml(task.prompt || "未命名模型")}</strong>
-          <span>${escapeHtml(task.providerName || task.provider || "生成平台")} · ${escapeHtml(task.mode === "image" ? "图片生成" : "文字生成")}</span>
+          <span>${escapeHtml(task.mode === "image" ? "图片生成" : "文字生成")}</span>
         </div>
         <span class="model-list-status">${escapeHtml(statusLabel)}</span>
       </div>
       <div class="model-list-meta">
         <span>任务 ID：${escapeHtml(task.taskId || task.id)}</span>
-        <span>模型版本：${escapeHtml(task.displayModelVersion || "-")}</span>
         <span>更新时间：${escapeHtml(timeLabel)}</span>
       </div>
       <div class="model-list-progress">
@@ -811,7 +810,7 @@ function renderGeneratedTaskMarkup(task) {
       </div>
       <div class="model-list-meta">
         <span>${progress}%</span>
-        <span>${escapeHtml(task.stageText || "等待处理")}</span>
+        <span>${escapeHtml(getTaskStageLabel(task))}</span>
       </div>
       <div class="model-list-actions">
         <button class="secondary-btn" type="button" data-refresh-task="${escapeHtml(task.id)}">刷新进度</button>
@@ -837,7 +836,7 @@ function updateTaskProgressOverlay(task) {
   const progress = getDisplayProgress(task);
   taskProgressOverlay.classList.remove("hidden");
   taskProgressTitle.textContent = task.prompt || "正在生成 3D 模型";
-  taskProgressMeta.textContent = `${task.providerName || task.provider || "生成平台"} · ${formatStatus(task.statusText || task.status)} · ${task.stageText || "处理中"}`;
+  taskProgressMeta.textContent = `${getTaskStatusLabel(task)} · ${getTaskStageLabel(task)}`;
   taskProgressFill.style.width = `${progress}%`;
   taskProgressPercent.textContent = `${progress}%`;
 }
@@ -3000,6 +2999,26 @@ function animate() {
 
 function normalizeProviderValue(value) {
   return String(value || "tripo").toLowerCase() === "meshy" ? "meshy" : "tripo";
+}
+
+function sanitizeGenerationText(value, fallback = "") {
+  const text = String(value || "")
+    .replace(/\bmeshy\b/ig, "")
+    .replace(/\btripo3d\b/ig, "")
+    .replace(/\btripo\b/ig, "")
+    .replace(/[·|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text || fallback;
+}
+
+function getTaskStatusLabel(task) {
+  return sanitizeGenerationText(formatStatus(task.statusText || task.status), "处理中");
+}
+
+function getTaskStageLabel(task) {
+  return sanitizeGenerationText(task.stageText, "处理中");
 }
 
 function clampProgress(value) {
