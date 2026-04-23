@@ -10,6 +10,45 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { KStereoEffect } from "/vendor/kmax/KStereoEffect.js";
 import { KStylusRaycaster } from "/vendor/kmax/KStylusRaycaster.js";
 import { WSTrack } from "/vendor/kmax/ws-track.js";
+import {
+  DEFAULT_PANORAMA_NAME,
+  DEFAULT_PANORAMA_URL,
+  GENERATED_TASK_STORAGE_KEY,
+  GENERATOR_PROVIDER_CONFIG,
+  OPTIMIZER_PROVIDER_CONFIG,
+  PREVIEW_TASK_STORAGE_LIMIT,
+  RECENT_STORAGE_KEY,
+  STEREO_CONFIG
+} from "/model-preview-config.js";
+import {
+  buildAssetProxyUrl,
+  escapeHtml,
+  formatBytes,
+  formatNumber,
+  formatPreviewError,
+  formatStatus,
+  formatTimeLabel,
+  getDisplayProgress,
+  getFileNameFromUrl,
+  getPreviewModelUrl,
+  getTaskStageLabel,
+  getTaskStatusLabel,
+  inferFormatFromUrl,
+  normalizeProviderValue,
+  parseStoredJson,
+  resolvePlayableModel,
+  sanitizeDownloadName,
+  sanitizeGenerationText,
+  stripExtension
+} from "/model-preview-utils.js";
+import {
+  loadStoredGeneratedTasks,
+  renderGeneratedTaskListView,
+  saveStoredGeneratedTasks,
+  sortGeneratedTaskRecords,
+  updateTaskProgressOverlayView,
+  upsertGeneratedTaskRecord
+} from "/model-preview-task-list.js";
 
 THREE.Cache.enabled = true;
 
@@ -107,92 +146,9 @@ const modelPlaybackLoadingTitle = document.getElementById("model-playback-loadin
 const modelPlaybackLoadingFilename = document.getElementById("model-playback-loading-filename");
 const modelPlaybackLoadingFill = document.getElementById("model-playback-loading-fill");
 const modelPlaybackLoadingPercent = document.getElementById("model-playback-loading-percent");
-
-const generatedTaskStorageKey = "model-preview-generated-tasks";
-const previewTaskStorageLimit = 18;
-
-const GENERATOR_PROVIDER_CONFIG = {
-  tripo: {
-    name: "Tripo3D",
-    modelVersions: [
-      { value: "P1-20260311", label: "P1-20260311" },
-      { value: "v3.1-20260211", label: "v3.1-20260211" },
-      { value: "v2.5-20250123", label: "v2.5-20250123" }
-    ],
-    textureOptions: [
-      { value: "standard", label: "standard" },
-      { value: "detailed", label: "detailed" }
-    ],
-    geometryOptions: [
-      { value: "standard", label: "标准" },
-      { value: "detailed", label: "精细" }
-    ],
-    defaultModelVersion: "P1-20260311",
-    defaultTextureQuality: "standard",
-    defaultGeometryQuality: "standard",
-    imageAccept: "image/png,image/jpeg,image/webp",
-    textPlaceholder: "例如：一朵高细节的白粉色百合花，摄影棚灯光，写实材质"
-  },
-  meshy: {
-    name: "Meshy",
-    modelVersions: [
-      { value: "latest", label: "latest (Meshy 6)" },
-      { value: "meshy-6", label: "meshy-6" },
-      { value: "meshy-5", label: "meshy-5" }
-    ],
-    textureOptions: [
-      { value: "standard", label: "基础贴图" },
-      { value: "detailed", label: "PBR 贴图" }
-    ],
-    geometryOptions: [
-      { value: "standard", label: "标准" },
-      { value: "lowpoly", label: "低多边形" }
-    ],
-    defaultModelVersion: "latest",
-    defaultTextureQuality: "standard",
-    defaultGeometryQuality: "standard",
-    imageAccept: "image/png,image/jpeg",
-    textPlaceholder: "例如：一个白色科幻头盔，蓝色发光细节，产品级渲染"
-  }
-};
-
-const OPTIMIZER_PROVIDER_CONFIG = {
-  meshy: {
-    name: "Meshy",
-    operationNotes: {
-      retexture: "当前会优先使用 Meshy 的公开 Retexture API，对当前播放模型做 AI 贴图。",
-      split: "AI拆模型入口已接到当前播放器，但本地运行时默认还没有接入公开拆件服务。"
-    }
-  },
-  tripo: {
-    name: "Tripo3D",
-    operationNotes: {
-      retexture: "Tripo3D 的 AI贴图入口已预留，如果当前环境没有公开端点，会给出明确提示。",
-      split: "Tripo3D 的 AI拆模型入口已预留，如果当前环境没有公开端点，会给出明确提示。"
-    }
-  }
-};
+const localModelPickerTriggers = Array.from(document.querySelectorAll('[for="model-files"]'));
 
 const resourceMap = new Map();
-const recentStorageKey = "model-preview-recent";
-
-const stereoConfig = {
-  screenWidth: 0.544,
-  screenHeight: 0.306,
-  screenScale: 1,
-  trackingScale: 0.32,
-  trackingScaleX: 0.24,
-  trackingScaleY: 0.16,
-  trackingScaleZ: 0.2,
-  trackingSmoothing: 0.1,
-  fitSize: 0.17,
-  targetDepth: -0.135,
-  cameraDistance: 0.46,
-  penRotationSpeed: 3.2,
-  penMoveScaleX: 1.25,
-  penMoveScaleY: 1.1,
-  penScaleSpeed: 1.8
-};
 
 let currentObject = null;
 let animationMixer = null;
@@ -233,8 +189,6 @@ let currentRemoteModelUrl = "";
 let currentPanoramaTexture = null;
 let currentPanoramaEnvironment = null;
 let currentPanoramaName = "";
-const DEFAULT_PANORAMA_URL = "/panoramas/default-panorama.png";
-const DEFAULT_PANORAMA_NAME = "默认天空盒";
 let apiConfig = null;
 let generatedTasks = [];
 let activeTaskPollers = new Map();
@@ -526,7 +480,9 @@ async function bootstrap() {
     themeSelect?.insertAdjacentElement("afterend", panoramaTrigger);
   }
 
-  fileInput.addEventListener("change", (event) => applySelectedFiles(Array.from(event.target.files || [])));
+  bindLocalModelPickerTriggers();
+  fileInput.addEventListener("change", handleLocalFileInputChange);
+  fileInput.addEventListener("input", handleLocalFileInputChange);
   panoramaFileInput?.addEventListener("change", () => {
     const file = panoramaFileInput.files?.[0];
     if (file) {
@@ -792,6 +748,42 @@ function fillSelectOptions(select, options, selectedValue) {
   }
 }
 
+function bindLocalModelPickerTriggers() {
+  for (const trigger of localModelPickerTriggers) {
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      openLocalModelPicker();
+    });
+  }
+}
+
+function openLocalModelPicker() {
+  if (!fileInput) {
+    setStatus("本地文件选择器不可用");
+    return;
+  }
+
+  fileInput.value = "";
+
+  if (typeof fileInput.showPicker === "function") {
+    try {
+      fileInput.showPicker();
+      return;
+    } catch {}
+  }
+
+  fileInput.click();
+}
+
+function handleLocalFileInputChange(event) {
+  const files = Array.from(event.target?.files || []);
+  if (!files.length) {
+    return;
+  }
+
+  applySelectedFiles(files);
+}
+
 function getActiveGeneratorConfig() {
   const providers = apiConfig?.providers || {};
   const configuredProvider = normalizeProviderValue(apiConfig?.generatorSettings?.provider);
@@ -862,6 +854,25 @@ function PROVIDER_CONFIG_FALLBACK(provider) {
   return provider === "tripo" ? GENERATOR_PROVIDER_CONFIG.tripo : GENERATOR_PROVIDER_CONFIG.meshy;
 }
 
+function sanitizeOptimizerText(text, fallback = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return fallback;
+  }
+
+  return normalized
+    .replace(/Meshy\s*AI贴图任务/g, "AI贴图任务")
+    .replace(/Meshy\s*贴图阶段/g, "AI贴图阶段")
+    .replace(/Meshy\s*预览阶段/g, "预览阶段")
+    .replace(/Meshy\s*图片生成阶段/g, "图片生成阶段")
+    .replace(/Meshy\s*生成任务/g, "生成任务")
+    .replace(/Meshy/g, "")
+    .replace(/Tripo3D/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[:：\s-]+|[:：\s-]+$/g, "")
+    || fallback;
+}
+
 function describeCurrentOptimizationTarget() {
   if (!currentObject) {
     return {
@@ -879,8 +890,8 @@ function describeCurrentOptimizationTarget() {
       modelUrl: currentRemoteModelUrl,
       label: fileName,
       extension: getExtension(fileName),
-      text: `当前优化对象：远程模型 ${fileName}`,
-      note: "将直接把当前远程模型 URL 提交给优化服务。"
+      text: "",
+      note: ""
     };
   }
 
@@ -897,7 +908,7 @@ function describeCurrentOptimizationTarget() {
   const extension = getExtension(modelFile.name);
   const multiFileHint = ["gltf", "obj"].includes(extension)
     ? "当前为多文件格式，优化服务通常更适合 GLB / FBX / STL；如果结果异常，建议先转换成单文件格式。"
-    : "将直接上传当前播放的模型文件。";
+    : "";
 
   return {
     ready: true,
@@ -905,7 +916,7 @@ function describeCurrentOptimizationTarget() {
     modelFile,
     label: modelFile.name,
     extension,
-    text: `当前优化对象：本地模型 ${modelFile.name}`,
+    text: "",
     note: multiFileHint
   };
 }
@@ -915,22 +926,22 @@ function syncOptimizerFormState() {
     return;
   }
 
-  const activeConfig = getActiveOptimizerConfig();
+  if (optimizerOperationSelect.value === "split") {
+    optimizerOperationSelect.value = "retexture";
+  }
+
   const operation = optimizerOperationSelect.value === "split" ? "split" : "retexture";
   const target = describeCurrentOptimizationTarget();
-  const capability = activeConfig.operations?.[operation];
 
   optimizerRetextureFields?.classList.toggle("hidden", operation !== "retexture");
   optimizerSplitFields?.classList.toggle("hidden", operation !== "split");
 
   if (optimizerCurrentModel) {
-    optimizerCurrentModel.textContent = `${target.text}${target.note ? ` ${target.note}` : ""}`;
+    optimizerCurrentModel.textContent = target.ready ? "" : target.text;
+    optimizerCurrentModel.classList.toggle("hidden", target.ready);
   }
 
-  const providerLabel = activeConfig.providerName || activeConfig.provider;
-  const notePrefix = OPTIMIZER_PROVIDER_CONFIG[activeConfig.provider]?.operationNotes?.[operation] || "";
-  const enabledText = capability?.enabled ? "当前环境可直接提交。" : "当前环境会在提交后给出明确提示。";
-  optimizerFormNote.textContent = `${providerLabel}：${notePrefix} ${enabledText}`.trim();
+  optimizerFormNote.textContent = "";
   optimizerSubmitButton.textContent = operation === "split" ? "开始优化当前模型" : "开始优化当前模型";
 
   if (!target.ready) {
@@ -1073,7 +1084,7 @@ async function handleOptimizerSubmit() {
   renderOptimizerTaskState({
     title: "正在创建优化任务",
     status: "提交中",
-    meta: `${provider === "meshy" ? "Meshy" : "Tripo3D"} 正在接收当前模型...`,
+    meta: "正在接收当前模型...",
     progress: 6,
     finalized: false
   });
@@ -1176,7 +1187,7 @@ async function pollOptimizerTask(taskId, provider, operation) {
       renderOptimizerTaskState({
         title: task.operation === "split" ? "AI拆模型" : "AI贴图",
         status: formatStatus(task.statusText || task.status),
-        meta: task.stageText || task.statusText || "处理中",
+        meta: sanitizeOptimizerText(task.stageText || task.statusText || "处理中", "处理中"),
         progress,
         finalized: finished,
         playable: Boolean(activeOptimizationPlayable)
@@ -1225,12 +1236,36 @@ async function playOptimizationResult() {
     return;
   }
 
+  if (activePlaybackLoadingTaskId) {
+    setStatus("已有模型正在加载中，请等待当前加载完成后再切换");
+    return;
+  }
+
+  const task = {
+    id: activeOptimizationTask?.id || `optimization-${Date.now()}`,
+    prompt: optimizerResultTitle?.textContent || "优化结果",
+    preferredModelUrl: activeOptimizationPlayable.url
+  };
+
   closeModal(optimizerModal);
-  await loadRemoteModel(activeOptimizationPlayable.url, {
-    name: stripExtension(getFileNameFromUrl(activeOptimizationPlayable.url)) || "optimized-model",
-    formatHint: activeOptimizationPlayable.format,
-    timeoutMs: MODEL_PLAYBACK_TIMEOUT_MS
-  });
+  beginPlaybackLoading(task);
+  const assetMetaPromise = readRemoteAssetMetadata(activeOptimizationPlayable.url).then((assetMeta) => assetMeta);
+
+  try {
+    const loaded = await loadRemoteModel(activeOptimizationPlayable.url, {
+      name: stripExtension(getFileNameFromUrl(activeOptimizationPlayable.url)) || "optimized-model",
+      formatHint: activeOptimizationPlayable.format,
+      timeoutMs: MODEL_PLAYBACK_TIMEOUT_MS,
+      taskId: task.id,
+      assetMetaPromise
+    });
+
+    if (!loaded) {
+      setStatus("优化结果加载失败，请稍后重试");
+    }
+  } finally {
+    endPlaybackLoading();
+  }
 }
 
 function downloadOptimizationResult() {
@@ -1295,143 +1330,77 @@ async function submitGeneratorTask({
 }
 
 function loadGeneratedTasks() {
-  generatedTasks = parseStoredJson(generatedTaskStorageKey, []);
-  sortGeneratedTasks();
+  generatedTasks = loadStoredGeneratedTasks({
+    storageKey: GENERATED_TASK_STORAGE_KEY,
+    parseStoredJson
+  });
   renderGeneratedTaskList();
 }
 
 function saveGeneratedTasks() {
-  sortGeneratedTasks();
-  localStorage.setItem(generatedTaskStorageKey, JSON.stringify(generatedTasks.slice(0, previewTaskStorageLimit)));
+  generatedTasks = saveStoredGeneratedTasks({
+    storageKey: GENERATED_TASK_STORAGE_KEY,
+    tasks: generatedTasks,
+    limit: PREVIEW_TASK_STORAGE_LIMIT
+  });
 }
 
 function sortGeneratedTasks() {
-  generatedTasks.sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt || left.createdAt || 0) || 0;
-    const rightTime = Date.parse(right.updatedAt || right.createdAt || 0) || 0;
-    return rightTime - leftTime;
-  });
+  generatedTasks = sortGeneratedTaskRecords(generatedTasks);
 }
 
 function upsertGeneratedTask(task) {
-  const existingIndex = generatedTasks.findIndex((item) => item.id === task.id);
-  const nextTask = {
-    ...(existingIndex >= 0 ? generatedTasks[existingIndex] : {}),
-    ...task
-  };
-
-  if (existingIndex >= 0) {
-    generatedTasks.splice(existingIndex, 1, nextTask);
-  } else {
-    generatedTasks.unshift(nextTask);
-  }
-
+  const nextState = upsertGeneratedTaskRecord(generatedTasks, task);
+  generatedTasks = nextState.tasks;
   saveGeneratedTasks();
-  return nextTask;
+  return nextState.task;
 }
 
 function renderGeneratedTaskList() {
-  if (!modelListItems || !modelListEmpty) {
-    return;
-  }
-
-  if (!generatedTasks.length) {
-    modelListEmpty.classList.remove("hidden");
-    modelListItems.innerHTML = "";
-    return;
-  }
-
-  modelListEmpty.classList.add("hidden");
-  modelListItems.innerHTML = generatedTasks.map(renderGeneratedTaskMarkup).join("");
-
-  modelListItems.querySelectorAll("[data-play-task]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void playGeneratedTask(button.dataset.playTask || "");
-    });
-  });
-
-  modelListItems.querySelectorAll("[data-download-task]").forEach((button) => {
-    button.addEventListener("click", () => {
-      downloadGeneratedTask(button.dataset.downloadTask || "");
-    });
-  });
-
-  modelListItems.querySelectorAll("[data-delete-task]").forEach((button) => {
-    button.addEventListener("click", () => {
-      deleteGeneratedTask(button.dataset.deleteTask || "");
-    });
-  });
-
-  modelListItems.querySelectorAll("[data-refresh-task]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const task = generatedTasks.find((item) => item.id === button.dataset.refreshTask);
+  renderGeneratedTaskListView({
+    tasks: generatedTasks,
+    modelListItems,
+    modelListEmpty,
+    activePlaybackLoadingTaskId,
+    onPlay(taskId) {
+      void playGeneratedTask(taskId);
+    },
+    onDownload(taskId) {
+      downloadGeneratedTask(taskId);
+    },
+    onDelete(taskId) {
+      deleteGeneratedTask(taskId);
+    },
+    onRefresh(taskId) {
+      const task = generatedTasks.find((item) => item.id === taskId);
       if (task) {
         void pollGeneratedTask(task.id, task.provider, true);
       }
-    });
+    },
+    escapeHtml,
+    formatBytes,
+    formatStatus,
+    formatTimeLabel,
+    getDisplayProgress,
+    getTaskStageLabel,
+    resolvePlayableModel
   });
 }
 
-function renderGeneratedTaskMarkup(task) {
-  const progress = getDisplayProgress(task);
-  const playable = resolvePlayableModel(task);
-  const canPlay = task.status === "success" && Boolean(playable?.url);
-  const canDownload = canPlay;
-  const timeLabel = formatTimeLabel(task.updatedAt || task.createdAt);
-  const statusLabel = formatStatus(task.statusText || task.status);
-  const isPlaybackLoading = activePlaybackLoadingTaskId === task.id;
-  const playDisabled = !canPlay || (Boolean(activePlaybackLoadingTaskId) && !isPlaybackLoading);
-  const playLabel = isPlaybackLoading ? "加载中..." : "播放模型";
-  const fileSizeLabel = Number(task.fileSizeBytes || 0) > 0 ? formatBytes(task.fileSizeBytes) : "-";
-
-  return `
-    <article class="model-list-item">
-      <div class="model-list-top">
-        <div class="model-list-title">
-          <strong>${escapeHtml(task.prompt || "未命名模型")}</strong>
-          <span>${escapeHtml(task.mode === "image" ? "图片生成" : "文字生成")}</span>
-        </div>
-        <span class="model-list-status">${escapeHtml(statusLabel)}</span>
-      </div>
-      <div class="model-list-meta">
-        <span>任务 ID：${escapeHtml(task.taskId || task.id)}</span>
-        <span>更新时间：${escapeHtml(timeLabel)}</span>
-        <span>文件大小：${escapeHtml(fileSizeLabel)}</span>
-      </div>
-      <div class="model-list-progress">
-        <div class="model-list-progress-fill" style="width:${progress}%"></div>
-      </div>
-      <div class="model-list-meta">
-        <span>${progress}%</span>
-        <span>${escapeHtml(getTaskStageLabel(task))}</span>
-      </div>
-      <div class="model-list-actions">
-        <button class="secondary-btn" type="button" data-refresh-task="${escapeHtml(task.id)}">刷新进度</button>
-        <button class="secondary-btn" type="button" data-delete-task="${escapeHtml(task.id)}">删除</button>
-        <button class="secondary-btn" type="button" data-download-task="${escapeHtml(task.id)}" ${canDownload ? "" : "disabled"}>下载</button>
-        <button class="primary-btn" type="button" data-play-task="${escapeHtml(task.id)}" ${playDisabled ? "disabled" : ""}>${playLabel}</button>
-      </div>
-    </article>
-  `;
-}
-
 function updateTaskProgressOverlay(task) {
-  if (!task || task.finalized) {
-    taskProgressOverlay.classList.add("hidden");
-    return;
-  }
-
-  if (dismissedTaskProgressId && dismissedTaskProgressId === task.id) {
-    taskProgressOverlay.classList.add("hidden");
-    return;
-  }
-
-  const progress = getDisplayProgress(task);
-  taskProgressOverlay.classList.remove("hidden");
-  taskProgressTitle.textContent = task.prompt || "正在生成 3D 模型";
-  taskProgressMeta.textContent = `${getTaskStatusLabel(task)} · ${getTaskStageLabel(task)}`;
-  taskProgressFill.style.width = `${progress}%`;
-  taskProgressPercent.textContent = `${progress}%`;
+  updateTaskProgressOverlayView({
+    task,
+    activeGeneratingTaskId,
+    dismissedTaskProgressId,
+    overlay: taskProgressOverlay,
+    title: taskProgressTitle,
+    meta: taskProgressMeta,
+    fill: taskProgressFill,
+    percent: taskProgressPercent,
+    getDisplayProgress,
+    getTaskStageLabel,
+    getTaskStatusLabel
+  });
 }
 
 function clearTaskProgressOverlay(taskId = "") {
@@ -1697,6 +1666,13 @@ function applySelectedFiles(files) {
   resourceMap.clear();
   currentObjectSource = "local";
   currentRemoteModelUrl = "";
+
+  if (files.length > 0) {
+    beginLocalSelectionLoading(files);
+  } else {
+    endLocalSelectionLoading();
+  }
+
   for (const file of files) {
     resourceMap.set(file.name, file);
   }
@@ -1724,6 +1700,7 @@ function applySelectedFiles(files) {
     resetStats();
     modelName.textContent = "没有可预览的模型";
     modelMeta.textContent = "请上传 .glb、.gltf、.fbx、.obj 或 .stl 文件。";
+    showLocalSelectionError("未发现可预览模型文件。请至少选择一个 .glb、.gltf、.fbx、.obj 或 .stl 文件。");
     clearCurrentObject();
     syncOptimizerFormState();
   }
@@ -1762,6 +1739,7 @@ async function handleLoadModel() {
     applyWireframeState();
     captureStereoReferenceCamera();
     setStatus("预览已加载");
+    endLocalSelectionLoading();
     syncOptimizerFormState();
   } catch (error) {
     if (!isModelLoadRequestCurrent(requestId)) {
@@ -1771,6 +1749,7 @@ async function handleLoadModel() {
     resetStats();
     setStatus("模型预览失败");
     modelMeta.textContent = formatPreviewError(error);
+    showLocalSelectionError(formatPreviewError(error));
     syncOptimizerFormState();
   } finally {
     loadButton.disabled = false;
@@ -2296,6 +2275,10 @@ function isModelLoadRequestCurrent(requestId) {
   return requestId === modelLoadRequestId;
 }
 
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
 function beginPlaybackLoading(task, assetMeta = {}) {
   if (playbackLoadTimeoutId) {
     clearTimeout(playbackLoadTimeoutId);
@@ -2320,6 +2303,45 @@ function beginPlaybackLoading(task, assetMeta = {}) {
     setStatus("模型加载超时，请稍后重试");
     endPlaybackLoading();
   }, MODEL_PLAYBACK_TIMEOUT_MS + 500);
+}
+
+function beginLocalSelectionLoading(files) {
+  if (!modelPlaybackLoading) {
+    return;
+  }
+
+  const names = files
+    .filter((file) => file && file.name)
+    .map((file) => file.name);
+  const primaryName = names[0] || "本地模型文件";
+  const extraCount = Math.max(names.length - 1, 0);
+
+  modelPlaybackLoadingTitle.textContent = "正在读取本地模型...";
+  modelPlaybackLoadingFilename.textContent = extraCount > 0
+    ? `“${primaryName}” 等 ${names.length} 个文件`
+    : `“${primaryName}”`;
+  modelPlaybackLoadingPercent.textContent = "准备中";
+  modelPlaybackLoadingFill.style.width = "12%";
+  modelPlaybackLoading.classList.remove("hidden");
+}
+
+function showLocalSelectionError(message) {
+  if (!modelPlaybackLoading) {
+    return;
+  }
+
+  modelPlaybackLoadingTitle.textContent = "本地模型加载失败";
+  modelPlaybackLoadingFilename.textContent = message || "请选择有效的模型文件，并确保依赖文件完整。";
+  modelPlaybackLoadingPercent.textContent = "失败";
+  modelPlaybackLoadingFill.style.width = "100%";
+}
+
+function endLocalSelectionLoading() {
+  if (!modelPlaybackLoading || activePlaybackLoadingTaskId) {
+    return;
+  }
+
+  modelPlaybackLoading.classList.add("hidden");
 }
 
 function endPlaybackLoading() {
@@ -3505,15 +3527,15 @@ function updateStereoSceneFit() {
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
-  const stereoScale = stereoConfig.fitSize / maxDim;
-  const stereoTarget = new THREE.Vector3(0, 0, stereoConfig.targetDepth);
+  const stereoScale = STEREO_CONFIG.fitSize / maxDim;
+  const stereoTarget = new THREE.Vector3(0, 0, STEREO_CONFIG.targetDepth);
 
   previewRoot.scale.setScalar(stereoScale);
   previewRoot.position.copy(stereoTarget).sub(center.multiplyScalar(stereoScale));
   previewRoot.updateMatrixWorld(true);
 
   stereoBaseTarget.copy(stereoTarget);
-  stereoBaseCameraPosition = new THREE.Vector3(0, 0, stereoConfig.cameraDistance);
+  stereoBaseCameraPosition = new THREE.Vector3(0, 0, STEREO_CONFIG.cameraDistance);
   smoothedEyeOffset.set(0, 0, 0);
 
   stereoCamera.position.copy(stereoBaseCameraPosition);
@@ -3798,8 +3820,8 @@ function updatePenExplodePartGrab(pen) {
 
   penGrabbedExplodePart.dragOffset.copy(penExplodePartGrabStartDragOffset)
     .add(new THREE.Vector3(
-      localDelta.x * stereoConfig.penMoveScaleX,
-      localDelta.y * stereoConfig.penMoveScaleY,
+      localDelta.x * STEREO_CONFIG.penMoveScaleX,
+      localDelta.y * STEREO_CONFIG.penMoveScaleY,
       localDelta.z * 1.15
     ))
     .addScaledVector(penGrabbedExplodePart.direction, pullDelta);
@@ -3853,7 +3875,7 @@ function updatePenGrab(pen) {
   currentObject.position.copy(nextPosition);
 
   const depthDelta = penGrabStartPose.z - pen.pos.z;
-  const scaleFactor = THREE.MathUtils.clamp(1 + depthDelta * stereoConfig.penScaleSpeed, 0.35, 3.5);
+  const scaleFactor = THREE.MathUtils.clamp(1 + depthDelta * STEREO_CONFIG.penScaleSpeed, 0.35, 3.5);
   currentObject.scale.copy(penGrabStartScale).multiplyScalar(scaleFactor);
 }
 
@@ -3920,12 +3942,12 @@ function updateStereoTrackedCamera() {
 
   if (eyePos) {
     const targetEyeOffset = new THREE.Vector3(
-      eyePos.x * stereoConfig.trackingScaleX,
-      eyePos.y * stereoConfig.trackingScaleY,
-      -eyePos.z * stereoConfig.trackingScaleZ
-    ).multiplyScalar(stereoConfig.trackingScale);
+      eyePos.x * STEREO_CONFIG.trackingScaleX,
+      eyePos.y * STEREO_CONFIG.trackingScaleY,
+      -eyePos.z * STEREO_CONFIG.trackingScaleZ
+    ).multiplyScalar(STEREO_CONFIG.trackingScale);
 
-    smoothedEyeOffset.lerp(targetEyeOffset, stereoConfig.trackingSmoothing);
+    smoothedEyeOffset.lerp(targetEyeOffset, STEREO_CONFIG.trackingSmoothing);
   }
 
   stereoCamera.position.add(smoothedEyeOffset);
@@ -3967,9 +3989,9 @@ function syncStereoRuntimeParams() {
 
   if (typeof runtimeModule._setScreenParams === "function") {
     runtimeModule._setScreenParams(
-      stereoConfig.screenWidth,
-      stereoConfig.screenHeight,
-      stereoConfig.screenScale
+      STEREO_CONFIG.screenWidth,
+      STEREO_CONFIG.screenHeight,
+      STEREO_CONFIG.screenScale
     );
   }
 
@@ -4036,14 +4058,14 @@ function updateLightStrength(value) {
 }
 
 function saveRecentEntry(entry) {
-  const current = JSON.parse(localStorage.getItem(recentStorageKey) || "[]");
+  const current = JSON.parse(localStorage.getItem(RECENT_STORAGE_KEY) || "[]");
   const next = [entry, ...current.filter((item) => item.name !== entry.name)].slice(0, 6);
-  localStorage.setItem(recentStorageKey, JSON.stringify(next));
+  localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(next));
   renderRecentEntries(next);
 }
 
 function loadRecentEntries() {
-  renderRecentEntries(JSON.parse(localStorage.getItem(recentStorageKey) || "[]"));
+  renderRecentEntries(JSON.parse(localStorage.getItem(RECENT_STORAGE_KEY) || "[]"));
 }
 
 function renderRecentEntries(items) {
@@ -4106,87 +4128,6 @@ function animate() {
   }
 }
 
-function normalizeProviderValue(value) {
-  return String(value || "tripo").toLowerCase() === "meshy" ? "meshy" : "tripo";
-}
-
-function sanitizeGenerationText(value, fallback = "") {
-  const text = String(value || "")
-    .replace(/\bmeshy\b/ig, "")
-    .replace(/\btripo3d\b/ig, "")
-    .replace(/\btripo\b/ig, "")
-    .replace(/[·|]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return text || fallback;
-}
-
-function getTaskStatusLabel(task) {
-  return sanitizeGenerationText(formatStatus(task.statusText || task.status), "处理中");
-}
-
-function getTaskStageLabel(task) {
-  return sanitizeGenerationText(task.stageText, "处理中");
-}
-
-function clampProgress(value) {
-  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-}
-
-function getDisplayProgress(task) {
-  const rawProgress = clampProgress(task?.progress);
-  const provider = normalizeProviderValue(task?.provider);
-  const stageText = String(task?.stageText || task?.statusText || task?.type || "");
-
-  if (provider === "meshy") {
-    if (stageText.includes("预览")) {
-      return Math.max(3, Math.round(rawProgress * 0.58));
-    }
-
-    if (stageText.includes("贴图")) {
-      return Math.max(60, Math.round(60 + rawProgress * 0.4));
-    }
-  }
-
-  return rawProgress;
-}
-
-function getPreviewModelUrl(task) {
-  return (
-    task?.preferredModelUrl ||
-    task?.modelUrls?.pbrModel ||
-    task?.modelUrls?.baseModel ||
-    task?.modelUrls?.model ||
-    task?.modelUrls?.glb ||
-    task?.modelUrls?.fbx ||
-    task?.modelUrls?.obj ||
-    task?.modelUrls?.stl ||
-    null
-  );
-}
-
-function resolvePlayableModel(task) {
-  const candidates = [
-    { url: task?.modelUrls?.glb, format: "glb" },
-    { url: task?.modelUrls?.model, format: inferFormatFromUrl(task?.modelUrls?.model || "") },
-    { url: task?.modelUrls?.pbrModel, format: inferFormatFromUrl(task?.modelUrls?.pbrModel || "") },
-    { url: task?.modelUrls?.baseModel, format: inferFormatFromUrl(task?.modelUrls?.baseModel || "") },
-    { url: task?.modelUrls?.preRemeshedGlb, format: "glb" },
-    { url: task?.modelUrls?.fbx, format: "fbx" },
-    { url: task?.modelUrls?.obj, format: "obj" },
-    { url: task?.modelUrls?.stl, format: "stl" },
-    { url: task?.preferredModelUrl, format: inferFormatFromUrl(task?.preferredModelUrl || "") }
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate.url) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
@@ -4215,7 +4156,7 @@ function normalizeRequestErrorMessage(message, details) {
     || detailText.includes("API route not found");
 
   if (isBusyError) {
-    return "Meshy 当前服务繁忙，请稍后重试。建议先切换到 Tripo3D，或过 1-2 分钟再提交。";
+    return "当前服务繁忙，请稍后重试。";
   }
 
   if (isMissingRouteError) {
@@ -4228,135 +4169,9 @@ function normalizeRequestErrorMessage(message, details) {
 function isMeshyBusyError(error) {
   const message = String(error?.message || "");
   const detailText = JSON.stringify(error?.details || {});
-  return message.includes("Meshy 当前服务繁忙")
+  return message.includes("当前服务繁忙")
     || message.includes("The server is busy. Please try again later.")
     || detailText.includes("The server is busy. Please try again later.");
 }
 
-function parseStoredJson(key, fallbackValue) {
-  try {
-    return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallbackValue));
-  } catch {
-    return fallbackValue;
-  }
-}
 
-function getFileNameFromUrl(url) {
-  try {
-    const parsedUrl = new URL(url, window.location.origin);
-    const pathname = parsedUrl.pathname.split("/").filter(Boolean).pop() || "";
-    return decodeURIComponent(pathname);
-  } catch {
-    return String(url).split("/").pop() || "";
-  }
-}
-
-function inferFormatFromUrl(url) {
-  return getExtension(getFileNameFromUrl(url));
-}
-
-function buildAssetProxyUrl(url) {
-  return `/api/asset?url=${encodeURIComponent(url)}`;
-}
-
-
-function sanitizeDownloadName(value) {
-  return String(value || "generated-model")
-    .trim()
-    .replace(/[\\/:*?"<>|]/g, "-")
-    .replace(/\s+/g, "-")
-    .slice(0, 64) || "generated-model";
-}
-
-function formatTimeLabel(value) {
-  if (!value) {
-    return "-";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function formatStatus(status) {
-  const text = String(status || "").trim();
-  const map = {
-    queued: "排队中",
-    running: "生成中",
-    success: "生成成功",
-    failed: "生成失败",
-    banned: "任务被拦截",
-    expired: "任务已过期",
-    cancelled: "任务已取消",
-    unknown: "状态未知",
-    pending: "排队中",
-    PENDING: "排队中",
-    IN_PROGRESS: "生成中",
-    SUCCEEDED: "生成成功",
-    FAILED: "生成失败",
-    CANCELED: "任务已取消",
-    CANCELLED: "任务已取消"
-  };
-
-  return map[text] || text || "处理中";
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("en-US").format(value || 0);
-}
-
-function stripExtension(fileName) {
-  const parts = String(fileName).split(".");
-  if (parts.length <= 1) return fileName;
-  parts.pop();
-  return parts.join(".");
-}
-
-function escapeHtml(text) {
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function formatPreviewError(error) {
-  const message = error instanceof Error
-    ? error.message
-    : typeof error === "string"
-      ? error
-      : "未知预览错误";
-
-  if (message.includes("Unexpected token") || message.includes("JSON")) {
-    return "模型文件无法解析，可能文件损坏，或者并不是有效的 3D 模型文件。";
-  }
-
-  if (message.includes("KHR_draco_mesh_compression") || message.includes("Draco")) {
-    return "该模型使用了 Draco 压缩，但浏览器解码失败。";
-  }
-
-  if (message.includes("EXT_meshopt_compression") || message.includes("Meshopt")) {
-    return "该模型使用了 Meshopt 压缩，但浏览器解码失败。";
-  }
-
-  if (message.includes("Failed to fetch") || message.includes("404")) {
-    return "模型依赖的贴图或二进制文件缺失，请将 .gltf 与对应的 .bin 和贴图文件一起上传。";
-  }
-
-  return message;
-}
