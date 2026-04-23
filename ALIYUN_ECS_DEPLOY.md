@@ -165,10 +165,16 @@ curl http://127.0.0.1/healthz
 http://你的ECS公网IP
 ```
 
-模型预览页：
+3D 模型播放器：
 
 ```text
 http://你的ECS公网IP/model-preview.html
+```
+
+模型公共配置页：
+
+```text
+http://你的ECS公网IP/model-setting.html
 ```
 
 ## 第十步：常用运维命令
@@ -254,5 +260,6 @@ docker run -d \
 ## 当前项目入口
 
 - 首页：`/`
-- 3D 预览页：`/model-preview.html`
+- 3D 模型播放器：`/model-preview.html`
+- 模型公共配置页：`/model-setting.html`
 - 健康检查：`/healthz`

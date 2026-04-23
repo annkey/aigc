@@ -35,6 +35,7 @@ MESHY_API_KEY=你的新Meshy密钥
 可检查：
 - `/`
 - `/model-preview.html`
+- `/model-setting.html`
 - `/healthz`
 
 示例：
@@ -42,6 +43,7 @@ MESHY_API_KEY=你的新Meshy密钥
 ```text
 https://你的railway域名/
 https://你的railway域名/model-preview.html
+https://你的railway域名/model-setting.html
 https://你的railway域名/healthz
 ```
 

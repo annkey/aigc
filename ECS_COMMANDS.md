@@ -72,6 +72,7 @@ curl http://127.0.0.1/healthz
 ```text
 http://你的ECS公网IP
 http://你的ECS公网IP/model-preview.html
+http://你的ECS公网IP/model-setting.html
 ```
 
 ## 8. 更新发布
