@@ -17,6 +17,45 @@ npm start
 - http://localhost:3000
 - http://localhost:3000/model-preview.html
 
+## 项目结构
+
+- `server.js`
+  - 后端入口，负责静态资源、配置接口、生成任务、任务查询、模型优化代理
+- `public/index.html`
+  - 主生成页结构
+- `public/app.js`
+  - 主生成页交互逻辑
+- `public/app-config.js`
+  - 主生成页稳定配置，包括 provider、模型版本、选项与文案
+- `public/model-preview.html`
+  - 本地 3D 预览页结构
+- `public/model-preview.js`
+  - 本地 3D 预览页主逻辑
+- `public/model-preview-utils.js`
+  - 预览页纯辅助函数，包括状态文本、任务进度、时间/大小格式化、下载名清洗、错误文案
+- `public/model-preview-task-list.js`
+  - 预览页生成任务列表与本地存储逻辑，包括列表渲染、任务记录排序、存取、进度浮层更新
+- `public/model-preview-config.js`
+  - 预览页稳定配置，包括 provider、默认参数、storage key、立体显示参数
+- `public/styles.css`
+  - 主生成页样式
+- `public/model-preview.css`
+  - 预览页样式
+- `docs/project-structure.md`
+  - 面向开发者和 Codex 的低成本上下文说明，包含改动入口和最小验证建议
+
+## 给 Codex 的最小上下文
+
+如果你想减少单次任务的额度消耗，建议提示词直接限制到具体文件和动作，例如：
+
+```text
+只处理 public/app.js 和 public/app-config.js。
+目标是调整主生成页的默认模型版本和提示文案。
+不要扫描整个仓库，不要改 server.js。
+验证只做最小页面检查。
+完成后只汇报：改了什么、验证了什么、还没验证什么。
+```
+
 ## 必填环境变量
 
 ```env
@@ -76,3 +115,4 @@ docker run -p 3000:3000 -e TRIPO_API_KEY=tsk_xxx -e MESHY_API_KEY=msy_xxx aigc-3
   "ok": true
 }
 ```
+
