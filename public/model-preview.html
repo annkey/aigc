@@ -58,6 +58,7 @@
           <div class="toolbar toolbar-ghost" aria-label="模型生成与列表">
             <label class="action-btn action-btn-secondary action-btn-file" for="model-files">本地模型播放</label>
             <button id="open-generator-modal" class="action-btn" type="button">AI生成模型</button>
+            <button id="open-optimizer-modal" class="action-btn action-btn-secondary" type="button">AI模型优化</button>
             <button id="open-model-list-modal" class="action-btn action-btn-secondary" type="button">3D模型列表</button>
           </div>
         </div>
@@ -190,6 +191,98 @@
               <div class="modal-actions">
                 <button class="secondary-btn" type="button" data-close-modal="generator-modal">取消</button>
                 <button id="generator-submit" class="primary-btn" type="submit">开始生成</button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <div id="optimizer-modal" class="modal-shell hidden" role="dialog" aria-modal="true" aria-labelledby="optimizer-modal-title">
+          <div class="modal-backdrop" data-close-modal="optimizer-modal"></div>
+          <section class="modal-card">
+            <div class="modal-head">
+              <div>
+                <h2 id="optimizer-modal-title">AI模型优化</h2>
+                <p>优化的是当前已经在预览器中播放的模型。</p>
+              </div>
+              <button class="modal-close" type="button" data-close-modal="optimizer-modal" aria-label="关闭">×</button>
+            </div>
+
+            <form id="optimizer-form" class="modal-form">
+              <div id="optimizer-current-model" class="form-summary">当前还没有正在播放的模型，请先加载模型。</div>
+
+              <label class="form-field">
+                <span>优化类型</span>
+                <select id="optimizer-operation" name="operation">
+                  <option value="retexture">AI贴图</option>
+                  <option value="split">AI拆模型</option>
+                </select>
+              </label>
+
+              <div id="optimizer-retexture-fields">
+                <label class="form-field">
+                  <span>贴图风格提示词</span>
+                  <textarea id="optimizer-texture-prompt" name="texturePrompt" rows="4" placeholder="例如：拉丝铝金属机身，边缘轻微磨损，生成清晰 PBR 细节"></textarea>
+                </label>
+
+                <label class="form-field">
+                  <span>风格参考图（可选）</span>
+                  <input id="optimizer-style-image" name="styleImage" type="file" accept="image/png,image/jpeg,image/webp" />
+                </label>
+
+                <div class="form-grid">
+                  <label class="form-field form-field-inline">
+                    <input id="optimizer-preserve-uv" name="preserveUv" type="checkbox" checked />
+                    <span>保留原始 UV</span>
+                  </label>
+
+                  <label class="form-field form-field-inline">
+                    <input id="optimizer-enable-pbr" name="enablePbr" type="checkbox" checked />
+                    <span>生成 PBR 贴图</span>
+                  </label>
+                </div>
+
+                <label class="form-field form-field-inline">
+                  <input id="optimizer-remove-lighting" name="removeLighting" type="checkbox" checked />
+                  <span>去除 baked 光照</span>
+                </label>
+              </div>
+
+              <div id="optimizer-split-fields" class="hidden">
+                <label class="form-field">
+                  <span>拆分目标说明</span>
+                  <textarea id="optimizer-split-prompt" name="splitPrompt" rows="4" placeholder="例如：按教学展示需要拆成主体、四肢、武器和配件，便于单独高亮"></textarea>
+                </label>
+
+                <label class="form-field">
+                  <span>拆分策略</span>
+                  <select id="optimizer-split-strategy" name="splitStrategy">
+                    <option value="semantic">按语义部件拆分</option>
+                    <option value="assembly">按装配结构拆分</option>
+                    <option value="teaching">按教学步骤拆分</option>
+                  </select>
+                </label>
+              </div>
+
+              <div id="optimizer-form-note" class="form-note"></div>
+
+              <div id="optimizer-result-card" class="modal-result-card hidden">
+                <div class="modal-result-head">
+                  <strong id="optimizer-result-title">等待提交</strong>
+                  <span id="optimizer-result-status" class="status-chip">待开始</span>
+                </div>
+                <p id="optimizer-result-meta">优化任务状态会显示在这里。</p>
+                <div class="task-progress-track">
+                  <div id="optimizer-result-fill" class="task-progress-fill"></div>
+                </div>
+                <div id="optimizer-result-actions" class="result-actions hidden">
+                  <button id="optimizer-play-result" class="secondary-btn" type="button">播放优化结果</button>
+                  <button id="optimizer-download-result" class="primary-btn" type="button">下载优化结果</button>
+                </div>
+              </div>
+
+              <div class="modal-actions">
+                <button class="secondary-btn" type="button" data-close-modal="optimizer-modal">取消</button>
+                <button id="optimizer-submit" class="primary-btn" type="submit">开始优化当前模型</button>
               </div>
             </form>
           </section>

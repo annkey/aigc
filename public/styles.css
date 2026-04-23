@@ -115,6 +115,22 @@ body {
   gap: 24px;
 }
 
+.workspace-grid {
+  margin-top: 24px;
+}
+
+.full-span {
+  grid-column: 1 / -1;
+}
+
+.compact-head p {
+  margin-bottom: 16px;
+}
+
+.workspace-switch {
+  max-width: 460px;
+}
+
 .panel {
   padding: 24px;
 }
@@ -180,6 +196,28 @@ body {
 .field {
   display: grid;
   gap: 8px;
+}
+
+.checkbox-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 0 16px;
+  border: 1px solid rgba(99, 66, 36, 0.14);
+  border-radius: 18px;
+  background: var(--surface-strong);
+  font-weight: 600;
+}
+
+.check-field input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
 }
 
 .field span {
@@ -250,6 +288,15 @@ textarea:focus {
   object-fit: cover;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
+}
+
+.capability-note {
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(196, 93, 45, 0.18);
+  background: linear-gradient(180deg, rgba(255, 246, 235, 0.96), rgba(255, 238, 221, 0.96));
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .primary-btn {
@@ -386,7 +433,8 @@ textarea:focus {
 @media (max-width: 960px) {
   .hero,
   .grid,
-  .field-row {
+  .field-row,
+  .checkbox-row {
     grid-template-columns: 1fr;
   }
 

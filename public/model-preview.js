@@ -34,6 +34,7 @@ const fullscreenButton = document.getElementById("toggle-fullscreen");
 const exportButton = document.getElementById("export-image");
 const submodelSelect = document.getElementById("submodel-select");
 const openGeneratorModalButton = document.getElementById("open-generator-modal");
+const openOptimizerModalButton = document.getElementById("open-optimizer-modal");
 const openModelListModalButton = document.getElementById("open-model-list-modal");
 const fileList = document.getElementById("file-list");
 const recentList = document.getElementById("recent-list");
@@ -56,6 +57,7 @@ const viewerShell = document.getElementById("viewer-shell");
 const metricsCard = document.querySelector(".metrics-card");
 const meshMetric = document.getElementById("mesh-metric");
 const generatorModal = document.getElementById("generator-modal");
+const optimizerModal = document.getElementById("optimizer-modal");
 const modelListModal = document.getElementById("model-list-modal");
 const generatorForm = document.getElementById("generator-form");
 const generatorModeSelect = document.getElementById("generator-mode");
@@ -69,6 +71,28 @@ const generatorGeometryQualitySelect = document.getElementById("generator-geomet
 const generatorNegativePromptInput = document.getElementById("generator-negative-prompt");
 const generatorSubmitButton = document.getElementById("generator-submit");
 const generatorFormNote = document.getElementById("generator-form-note");
+const optimizerForm = document.getElementById("optimizer-form");
+const optimizerCurrentModel = document.getElementById("optimizer-current-model");
+const optimizerOperationSelect = document.getElementById("optimizer-operation");
+const optimizerRetextureFields = document.getElementById("optimizer-retexture-fields");
+const optimizerSplitFields = document.getElementById("optimizer-split-fields");
+const optimizerTexturePromptInput = document.getElementById("optimizer-texture-prompt");
+const optimizerStyleImageInput = document.getElementById("optimizer-style-image");
+const optimizerPreserveUvInput = document.getElementById("optimizer-preserve-uv");
+const optimizerEnablePbrInput = document.getElementById("optimizer-enable-pbr");
+const optimizerRemoveLightingInput = document.getElementById("optimizer-remove-lighting");
+const optimizerSplitPromptInput = document.getElementById("optimizer-split-prompt");
+const optimizerSplitStrategySelect = document.getElementById("optimizer-split-strategy");
+const optimizerFormNote = document.getElementById("optimizer-form-note");
+const optimizerSubmitButton = document.getElementById("optimizer-submit");
+const optimizerResultCard = document.getElementById("optimizer-result-card");
+const optimizerResultTitle = document.getElementById("optimizer-result-title");
+const optimizerResultStatus = document.getElementById("optimizer-result-status");
+const optimizerResultMeta = document.getElementById("optimizer-result-meta");
+const optimizerResultFill = document.getElementById("optimizer-result-fill");
+const optimizerResultActions = document.getElementById("optimizer-result-actions");
+const optimizerPlayResultButton = document.getElementById("optimizer-play-result");
+const optimizerDownloadResultButton = document.getElementById("optimizer-download-result");
 const modelListItems = document.getElementById("model-list-items");
 const modelListEmpty = document.getElementById("model-list-empty");
 const taskProgressOverlay = document.getElementById("task-progress-overlay");
@@ -132,6 +156,23 @@ const GENERATOR_PROVIDER_CONFIG = {
   }
 };
 
+const OPTIMIZER_PROVIDER_CONFIG = {
+  meshy: {
+    name: "Meshy",
+    operationNotes: {
+      retexture: "当前会优先使用 Meshy 的公开 Retexture API，对当前播放模型做 AI 贴图。",
+      split: "AI拆模型入口已接到当前播放器，但本地运行时默认还没有接入公开拆件服务。"
+    }
+  },
+  tripo: {
+    name: "Tripo3D",
+    operationNotes: {
+      retexture: "Tripo3D 的 AI贴图入口已预留，如果当前环境没有公开端点，会给出明确提示。",
+      split: "Tripo3D 的 AI拆模型入口已预留，如果当前环境没有公开端点，会给出明确提示。"
+    }
+  }
+};
+
 const resourceMap = new Map();
 const recentStorageKey = "model-preview-recent";
 
@@ -175,12 +216,18 @@ let wasPenPressed = false;
 let smoothedEyeOffset = new THREE.Vector3();
 let lastStylusIntersections = [];
 let isPenGrabbingModel = false;
+let isPenGrabbingExplodePart = false;
+let penGrabbedExplodePart = null;
 let penGrabStartPose = null;
 let penGrabStartPosition = new THREE.Vector3();
 let penGrabStartQuaternion = new THREE.Quaternion();
 let penGrabStartScale = new THREE.Vector3(1, 1, 1);
 let penGrabStartRotation = null;
 let penGrabHitPointLocal = null;
+let penExplodePartGrabHitPointLocal = null;
+let penExplodePartGrabStartPose = null;
+const penExplodePartGrabStartStylusLocal = new THREE.Vector3();
+const penExplodePartGrabStartDragOffset = new THREE.Vector3();
 let currentObjectSource = "local";
 let currentRemoteModelUrl = "";
 let currentPanoramaTexture = null;
@@ -191,6 +238,9 @@ const DEFAULT_PANORAMA_NAME = "默认天空盒";
 let apiConfig = null;
 let generatedTasks = [];
 let activeTaskPollers = new Map();
+let activeOptimizationPoller = null;
+let activeOptimizationTask = null;
+let activeOptimizationPlayable = null;
 let activeGeneratingTaskId = "";
 let dismissedTaskProgressId = "";
 let autoPlayingGeneratedTaskId = "";
@@ -218,6 +268,13 @@ const selectedPartDragStartOffsetWorld = new THREE.Vector3();
 const selectedPartDragCameraRight = new THREE.Vector3();
 const selectedPartDragCameraUp = new THREE.Vector3();
 const selectedPartDragPullDirection = new THREE.Vector3();
+let isDraggingWholeModelPointer = false;
+let wholeModelDragPointerId = null;
+let wholeModelDragStartScreen = null;
+const wholeModelDragStartPosition = new THREE.Vector3();
+const wholeModelDragCameraRightLocal = new THREE.Vector3();
+const wholeModelDragCameraUpLocal = new THREE.Vector3();
+let wholeModelDragScreenScale = 0.002;
 
 const MODEL_PLAYBACK_TIMEOUT_MS = 120000;
 const EXPLODE_DISTANCE_SCALE = 0.32;
@@ -509,6 +566,10 @@ async function bootstrap() {
     void handleLoadModel();
   });
   openGeneratorModalButton.addEventListener("click", () => openModal(generatorModal));
+  openOptimizerModalButton?.addEventListener("click", () => {
+    syncOptimizerFormState();
+    openModal(optimizerModal);
+  });
   openModelListModalButton.addEventListener("click", () => {
     renderGeneratedTaskList();
     openModal(modelListModal);
@@ -519,10 +580,17 @@ async function bootstrap() {
   });
   taskProgressCloseButton?.addEventListener("click", dismissTaskProgressOverlay);
   generatorModeSelect.addEventListener("change", syncGeneratorModeFieldState);
+  optimizerOperationSelect?.addEventListener("change", syncOptimizerFormState);
   generatorForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void handleGeneratorSubmit();
   });
+  optimizerForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void handleOptimizerSubmit();
+  });
+  optimizerPlayResultButton?.addEventListener("click", () => void playOptimizationResult());
+  optimizerDownloadResultButton?.addEventListener("click", downloadOptimizationResult);
   document.querySelectorAll("[data-close-modal]").forEach((button) => {
     button.addEventListener("click", () => {
       const modal = document.getElementById(button.dataset.closeModal || "");
@@ -593,6 +661,7 @@ async function bootstrap() {
 
   syncGeneratorFormForProvider();
   syncGeneratorModeFieldState();
+  syncOptimizerFormState();
   resumePendingGeneratedTasks();
 }
 
@@ -675,6 +744,7 @@ function handleGlobalKeydown(event) {
   }
 
   closeModal(generatorModal);
+  closeModal(optimizerModal);
   closeModal(modelListModal);
 }
 
@@ -762,6 +832,113 @@ function syncGeneratorFormForProvider() {
     generatorConfigSummary.textContent = "";
   }
   generatorFormNote.textContent = "";
+}
+
+function getActiveOptimizerConfig() {
+  const providers = apiConfig?.optimization?.providers || {};
+  const operation = optimizerOperationSelect?.value === "split" ? "split" : "retexture";
+  const preferredProvider = operation === "retexture" ? "meshy" : "tripo";
+  const fallbackProvider = providers[preferredProvider]
+    ? preferredProvider
+    : providers.meshy
+      ? "meshy"
+      : "tripo";
+  const provider = providers[fallbackProvider] ? fallbackProvider : preferredProvider;
+  const providerConfig = OPTIMIZER_PROVIDER_CONFIG[provider] || OPTIMIZER_PROVIDER_CONFIG.meshy;
+  const providerApiConfig = providers[provider] || {};
+
+  return {
+    provider,
+    providerName: providerApiConfig.name || providerConfig.name,
+    modelVersion: providerApiConfig.defaultModelVersion
+      || PROVIDER_CONFIG_FALLBACK(provider).defaultModelVersion,
+    modelVersions: providerApiConfig.modelVersions
+      || PROVIDER_CONFIG_FALLBACK(provider).modelVersions,
+    operations: providerApiConfig.operations || {}
+  };
+}
+
+function PROVIDER_CONFIG_FALLBACK(provider) {
+  return provider === "tripo" ? GENERATOR_PROVIDER_CONFIG.tripo : GENERATOR_PROVIDER_CONFIG.meshy;
+}
+
+function describeCurrentOptimizationTarget() {
+  if (!currentObject) {
+    return {
+      ready: false,
+      text: "当前还没有正在播放的模型，请先加载模型。",
+      note: "AI模型优化针对当前预览对象工作。"
+    };
+  }
+
+  if (currentObjectSource === "remote" && currentRemoteModelUrl) {
+    const fileName = getFileNameFromUrl(currentRemoteModelUrl) || modelName.textContent || "远程模型";
+    return {
+      ready: true,
+      sourceType: "remote",
+      modelUrl: currentRemoteModelUrl,
+      label: fileName,
+      extension: getExtension(fileName),
+      text: `当前优化对象：远程模型 ${fileName}`,
+      note: "将直接把当前远程模型 URL 提交给优化服务。"
+    };
+  }
+
+  const selectedName = entryFileSelect.value;
+  const modelFile = resourceMap.get(selectedName);
+  if (!modelFile) {
+    return {
+      ready: false,
+      text: "当前模型来源无法识别，请重新加载一次模型后再试。",
+      note: ""
+    };
+  }
+
+  const extension = getExtension(modelFile.name);
+  const multiFileHint = ["gltf", "obj"].includes(extension)
+    ? "当前为多文件格式，优化服务通常更适合 GLB / FBX / STL；如果结果异常，建议先转换成单文件格式。"
+    : "将直接上传当前播放的模型文件。";
+
+  return {
+    ready: true,
+    sourceType: "local",
+    modelFile,
+    label: modelFile.name,
+    extension,
+    text: `当前优化对象：本地模型 ${modelFile.name}`,
+    note: multiFileHint
+  };
+}
+
+function syncOptimizerFormState() {
+  if (!optimizerOperationSelect) {
+    return;
+  }
+
+  const activeConfig = getActiveOptimizerConfig();
+  const operation = optimizerOperationSelect.value === "split" ? "split" : "retexture";
+  const target = describeCurrentOptimizationTarget();
+  const capability = activeConfig.operations?.[operation];
+
+  optimizerRetextureFields?.classList.toggle("hidden", operation !== "retexture");
+  optimizerSplitFields?.classList.toggle("hidden", operation !== "split");
+
+  if (optimizerCurrentModel) {
+    optimizerCurrentModel.textContent = `${target.text}${target.note ? ` ${target.note}` : ""}`;
+  }
+
+  const providerLabel = activeConfig.providerName || activeConfig.provider;
+  const notePrefix = OPTIMIZER_PROVIDER_CONFIG[activeConfig.provider]?.operationNotes?.[operation] || "";
+  const enabledText = capability?.enabled ? "当前环境可直接提交。" : "当前环境会在提交后给出明确提示。";
+  optimizerFormNote.textContent = `${providerLabel}：${notePrefix} ${enabledText}`.trim();
+  optimizerSubmitButton.textContent = operation === "split" ? "开始优化当前模型" : "开始优化当前模型";
+
+  if (!target.ready) {
+    optimizerSubmitButton.disabled = true;
+    return;
+  }
+
+  optimizerSubmitButton.disabled = false;
 }
 
 function syncGeneratorModeFieldState() {
@@ -866,6 +1043,209 @@ async function handleGeneratorSubmit() {
     generatorSubmitButton.disabled = false;
     generatorSubmitButton.textContent = "开始生成";
   }
+}
+
+async function handleOptimizerSubmit() {
+  const activeConfig = getActiveOptimizerConfig();
+  const provider = activeConfig.provider;
+  const operation = optimizerOperationSelect.value === "split" ? "split" : "retexture";
+  const target = describeCurrentOptimizationTarget();
+
+  if (!target.ready) {
+    setStatus(target.text);
+    syncOptimizerFormState();
+    return;
+  }
+
+  if (operation === "retexture") {
+    const texturePrompt = optimizerTexturePromptInput.value.trim();
+    const styleImage = optimizerStyleImageInput.files?.[0] || null;
+
+    if (!texturePrompt && !styleImage) {
+      setStatus("AI贴图至少需要提示词或一张风格参考图");
+      optimizerTexturePromptInput.focus();
+      return;
+    }
+  }
+
+  optimizerSubmitButton.disabled = true;
+  optimizerSubmitButton.textContent = "正在提交...";
+  renderOptimizerTaskState({
+    title: "正在创建优化任务",
+    status: "提交中",
+    meta: `${provider === "meshy" ? "Meshy" : "Tripo3D"} 正在接收当前模型...`,
+    progress: 6,
+    finalized: false
+  });
+  setStatus("正在提交模型优化请求，请稍候...");
+
+  try {
+    const result = await submitOptimizerTask({
+      provider,
+      operation,
+      target,
+      modelVersion: activeConfig.modelVersion
+    });
+
+    if (!result.taskId) {
+      throw createDetailedError("优化任务没有返回任务 ID。", result);
+    }
+
+    activeOptimizationTask = {
+      id: result.taskId,
+      provider: result.provider || provider,
+      operation: result.operation || operation,
+      providerName: result.providerName || activeConfig.providerName,
+      displayModelVersion: result.displayModelVersion || activeConfig.modelVersion
+    };
+    activeOptimizationPlayable = null;
+
+    renderOptimizerTaskState({
+      title: operation === "split" ? "AI拆模型已提交" : "AI贴图已提交",
+      status: "处理中",
+      meta: `任务 ID：${result.taskId}`,
+      progress: 10,
+      finalized: false
+    });
+
+    await pollOptimizerTask(result.taskId, activeOptimizationTask.provider, activeOptimizationTask.operation);
+  } catch (error) {
+    renderOptimizerTaskState({
+      title: "优化提交失败",
+      status: "失败",
+      meta: error.message || "模型优化提交失败",
+      progress: 0,
+      finalized: true
+    });
+    optimizerFormNote.textContent = error.message || "模型优化提交失败";
+    setStatus(error.message || "模型优化提交失败");
+  } finally {
+    optimizerSubmitButton.disabled = false;
+    optimizerSubmitButton.textContent = "开始优化当前模型";
+  }
+}
+
+async function submitOptimizerTask({ provider, operation, target, modelVersion }) {
+  const payload = new FormData();
+  payload.append("provider", provider);
+  payload.append("operation", operation);
+  payload.append("modelVersion", modelVersion);
+  payload.append("target", "preview");
+  payload.append("saveMode", "new_revision");
+
+  if (target.sourceType === "remote" && target.modelUrl) {
+    payload.append("modelUrl", target.modelUrl);
+  } else if (target.modelFile) {
+    payload.append("modelFile", target.modelFile);
+  }
+
+  if (operation === "retexture") {
+    payload.append("texturePrompt", optimizerTexturePromptInput.value.trim());
+    payload.append("preserveUv", String(optimizerPreserveUvInput.checked));
+    payload.append("enablePbr", String(optimizerEnablePbrInput.checked));
+    payload.append("removeLighting", String(optimizerRemoveLightingInput.checked));
+
+    const styleImage = optimizerStyleImageInput.files?.[0] || null;
+    if (styleImage) {
+      payload.append("styleImage", styleImage);
+    }
+  } else {
+    payload.append("splitPrompt", optimizerSplitPromptInput.value.trim());
+    payload.append("splitStrategy", optimizerSplitStrategySelect.value);
+  }
+
+  return fetchJson("/api/model-optimize", {
+    method: "POST",
+    body: payload
+  });
+}
+
+async function pollOptimizerTask(taskId, provider, operation) {
+  clearOptimizerPoller();
+
+  const run = async () => {
+    try {
+      const task = await fetchJson(
+        `/api/model-optimize/task/${taskId}?provider=${encodeURIComponent(provider)}&operation=${encodeURIComponent(operation)}`
+      );
+      const progress = clampProgress(task.progress);
+      const playable = resolvePlayableModel(task);
+      const finished = Boolean(task.finalized);
+      activeOptimizationPlayable = playable?.url ? { ...playable, task } : null;
+
+      renderOptimizerTaskState({
+        title: task.operation === "split" ? "AI拆模型" : "AI贴图",
+        status: formatStatus(task.statusText || task.status),
+        meta: task.stageText || task.statusText || "处理中",
+        progress,
+        finalized: finished,
+        playable: Boolean(activeOptimizationPlayable)
+      });
+
+      if (finished) {
+        clearOptimizerPoller();
+        setStatus(task.status === "success" ? "模型优化已完成" : (task.statusText || "模型优化已结束"));
+      }
+    } catch (error) {
+      clearOptimizerPoller();
+      renderOptimizerTaskState({
+        title: "优化查询失败",
+        status: "失败",
+        meta: error.message || "优化任务状态查询失败",
+        progress: 0,
+        finalized: true
+      });
+      setStatus(error.message || "优化任务状态查询失败");
+    }
+  };
+
+  await run();
+  activeOptimizationPoller = window.setInterval(run, 4000);
+}
+
+function renderOptimizerTaskState({ title, status, meta, progress, finalized, playable = false }) {
+  optimizerResultCard?.classList.remove("hidden");
+  optimizerResultTitle.textContent = title || "AI模型优化";
+  optimizerResultStatus.textContent = status || "处理中";
+  optimizerResultMeta.textContent = meta || "";
+  optimizerResultFill.style.width = `${Math.max(0, Math.min(100, progress || 0))}%`;
+  optimizerResultActions.classList.toggle("hidden", !(finalized && playable));
+}
+
+function clearOptimizerPoller() {
+  if (activeOptimizationPoller) {
+    clearInterval(activeOptimizationPoller);
+    activeOptimizationPoller = null;
+  }
+}
+
+async function playOptimizationResult() {
+  if (!activeOptimizationPlayable?.url) {
+    setStatus("当前优化任务还没有可播放的模型");
+    return;
+  }
+
+  closeModal(optimizerModal);
+  await loadRemoteModel(activeOptimizationPlayable.url, {
+    name: stripExtension(getFileNameFromUrl(activeOptimizationPlayable.url)) || "optimized-model",
+    formatHint: activeOptimizationPlayable.format,
+    timeoutMs: MODEL_PLAYBACK_TIMEOUT_MS
+  });
+}
+
+function downloadOptimizationResult() {
+  if (!activeOptimizationPlayable?.url) {
+    setStatus("当前优化任务还没有可下载的模型");
+    return;
+  }
+
+  const extension = getExtension(activeOptimizationPlayable.format || inferFormatFromUrl(activeOptimizationPlayable.url) || "glb") || "glb";
+  const safeName = sanitizeDownloadName(`${modelName.textContent || "current-model"}-optimized`);
+  const link = document.createElement("a");
+  link.href = buildAssetProxyUrl(activeOptimizationPlayable.url);
+  link.download = `${safeName}.${extension}`;
+  link.click();
+  setStatus("优化模型下载已开始");
 }
 
 function getGeneratorDefaults(provider) {
@@ -1331,6 +1711,7 @@ function applySelectedFiles(files) {
     modelName.textContent = "尚未加载模型";
     modelMeta.textContent = "上传本地模型文件后，即可在浏览器中预览。";
     clearCurrentObject();
+    syncOptimizerFormState();
     return;
   }
 
@@ -1344,6 +1725,7 @@ function applySelectedFiles(files) {
     modelName.textContent = "没有可预览的模型";
     modelMeta.textContent = "请上传 .glb、.gltf、.fbx、.obj 或 .stl 文件。";
     clearCurrentObject();
+    syncOptimizerFormState();
   }
 }
 
@@ -1380,6 +1762,7 @@ async function handleLoadModel() {
     applyWireframeState();
     captureStereoReferenceCamera();
     setStatus("预览已加载");
+    syncOptimizerFormState();
   } catch (error) {
     if (!isModelLoadRequestCurrent(requestId)) {
       return;
@@ -1388,6 +1771,7 @@ async function handleLoadModel() {
     resetStats();
     setStatus("模型预览失败");
     modelMeta.textContent = formatPreviewError(error);
+    syncOptimizerFormState();
   } finally {
     loadButton.disabled = false;
   }
@@ -1485,6 +1869,7 @@ async function loadRemoteModel(modelUrl, options = {}) {
       percent: 100
     });
     setStatus("生成模型已载入预览器");
+    syncOptimizerFormState();
     return true;
   } catch (error) {
     if (!isModelLoadRequestCurrent(requestId)) {
@@ -1499,6 +1884,7 @@ async function loadRemoteModel(modelUrl, options = {}) {
     resetStats();
     modelMeta.textContent = formatPreviewError(error);
     setStatus("生成模型加载失败");
+    syncOptimizerFormState();
     return false;
   } finally {
     if (timeoutId) {
@@ -1875,6 +2261,7 @@ function clearCurrentObject() {
     currentRemoteModelUrl = "";
     currentModelFileSizeBytes = 0;
     updateExplodeButton();
+    syncOptimizerFormState();
     return;
   }
 
@@ -1887,6 +2274,7 @@ function clearCurrentObject() {
   currentModelFileSizeBytes = 0;
   resetStereoSceneFit();
   updateExplodeButton();
+  syncOptimizerFormState();
 }
 
 function beginModelLoadRequest() {
@@ -2259,6 +2647,10 @@ function resetExplodePartDragOffset(part) {
   part?.dragOffset?.set(0, 0, 0);
 }
 
+function hasMultipleExplodableParts() {
+  return explodeParts.length > 1;
+}
+
 function stopSelectedPartDrag() {
   if (!isDraggingSelectedPart) {
     return;
@@ -2268,6 +2660,17 @@ function stopSelectedPartDrag() {
   draggingExplodePart = null;
   selectedPartDragStartScreen = null;
   controls.enabled = true;
+}
+
+function stopWholeModelPointerDrag() {
+  if (!isDraggingWholeModelPointer) {
+    return;
+  }
+
+  isDraggingWholeModelPointer = false;
+  wholeModelDragPointerId = null;
+  wholeModelDragStartScreen = null;
+  controls.enabled = !isStereoInteractive();
 }
 
 function clearSelectedExplodePart() {
@@ -2289,7 +2692,7 @@ function clearSelectedExplodePart() {
 }
 
 function highlightExplodePart(part) {
-  if (!part?.object) {
+  if (!part?.object || !hasMultipleExplodableParts()) {
     return;
   }
 
@@ -2302,17 +2705,34 @@ function highlightExplodePart(part) {
     const clone = material?.clone?.() || material;
 
     if ("emissive" in clone && clone.emissive?.setHex) {
-      clone.emissive.setHex(0x2563eb);
-      clone.emissiveIntensity = Math.max(0.45, Number(clone.emissiveIntensity) || 0.45);
+      clone.emissive.setHex(0x7fb0ff);
+      clone.emissiveIntensity = Math.max(0.12, Number(clone.emissiveIntensity) || 0.12);
     } else if ("color" in clone && clone.color?.offsetHSL) {
       clone.color = clone.color.clone();
-      clone.color.offsetHSL(0.01, 0.18, 0.08);
+      clone.color.offsetHSL(0.005, 0.06, 0.03);
     }
 
     return clone;
   });
 
   part.object.material = Array.isArray(part.object.material) ? highlightedMaterials : highlightedMaterials[0];
+}
+
+function activateSingleExplodePart(part, statusMessage) {
+  if (!part || !hasMultipleExplodableParts()) {
+    return false;
+  }
+
+  highlightExplodePart(part);
+  explodeMode = "single";
+  explodeTarget = 1;
+  updateExplodeButton();
+
+  if (statusMessage) {
+    setStatus(statusMessage);
+  }
+
+  return true;
 }
 
 function findExplodePartByMesh(mesh) {
@@ -2324,7 +2744,7 @@ function findExplodePartByMesh(mesh) {
 }
 
 function pickExplodePartFromPointer(event) {
-  if (!currentObject || !explodeParts.length) {
+  if (!currentObject || !hasMultipleExplodableParts()) {
     return null;
   }
 
@@ -2353,6 +2773,50 @@ function updatePointerSelectionRay(event, activeCamera = getPrimaryCamera()) {
   pointerSelectionCoords.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointerSelectionCoords.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   pointerSelectionRaycaster.setFromCamera(pointerSelectionCoords, activeCamera);
+  return true;
+}
+
+function beginWholeModelPointerDrag(event) {
+  if (!currentObject || event.button !== 0 || !event.shiftKey) {
+    return false;
+  }
+
+  const activeCamera = getPrimaryCamera();
+  const previewRootWorldQuaternion = previewRoot.getWorldQuaternion(new THREE.Quaternion());
+  const previewRootWorldQuaternionInverse = previewRootWorldQuaternion.clone().invert();
+  const cameraRight = new THREE.Vector3();
+  const cameraUp = new THREE.Vector3();
+  activeCamera.matrixWorld.extractBasis(cameraRight, cameraUp, new THREE.Vector3());
+
+  const objectSize = new THREE.Box3().setFromObject(currentObject).getSize(new THREE.Vector3()).length() || 1;
+  wholeModelDragScreenScale = Math.max(objectSize * 0.0018, 0.003);
+  wholeModelDragStartScreen = { x: event.clientX, y: event.clientY };
+  wholeModelDragStartPosition.copy(currentObject.position);
+  wholeModelDragCameraRightLocal.copy(cameraRight.applyQuaternion(previewRootWorldQuaternionInverse).normalize());
+  wholeModelDragCameraUpLocal.copy(cameraUp.applyQuaternion(previewRootWorldQuaternionInverse).normalize());
+  isDraggingWholeModelPointer = true;
+  wholeModelDragPointerId = event.pointerId;
+  controls.enabled = false;
+  renderer.domElement.setPointerCapture?.(event.pointerId);
+  setStatus("正在拖拽整体模型，松开可继续旋转场景");
+  return true;
+}
+
+function updateWholeModelPointerDrag(event) {
+  if (!isDraggingWholeModelPointer || !currentObject) {
+    return false;
+  }
+
+  if (wholeModelDragPointerId !== null && event.pointerId !== undefined && wholeModelDragPointerId !== event.pointerId) {
+    return false;
+  }
+
+  const deltaX = event.clientX - wholeModelDragStartScreen.x;
+  const deltaY = event.clientY - wholeModelDragStartScreen.y;
+  currentObject.position.copy(wholeModelDragStartPosition)
+    .addScaledVector(wholeModelDragCameraRightLocal, deltaX * wholeModelDragScreenScale)
+    .addScaledVector(wholeModelDragCameraUpLocal, -deltaY * wholeModelDragScreenScale);
+  captureStereoReferenceCamera();
   return true;
 }
 
@@ -3073,6 +3537,11 @@ function isStereoInteractive() {
 function handleViewerPointerDown(event) {
   pointerDownScreen = { x: event.clientX, y: event.clientY };
 
+  if (beginWholeModelPointerDrag(event)) {
+    suppressNextViewerClick = true;
+    return;
+  }
+
   if (beginSelectedPartDrag(event)) {
     suppressNextViewerClick = true;
     return;
@@ -3091,6 +3560,10 @@ function handleViewerPointerDown(event) {
 }
 
 function handleViewerPointerMove(event) {
+  if (updateWholeModelPointerDrag(event)) {
+    return;
+  }
+
   if (updateSelectedPartDrag(event)) {
     return;
   }
@@ -3113,6 +3586,11 @@ function handleViewerPointerMove(event) {
 }
 
 function handleViewerPointerUp(event) {
+  if (isDraggingWholeModelPointer) {
+    stopWholeModelPointerDrag();
+    return;
+  }
+
   if (isDraggingSelectedPart) {
     stopSelectedPartDrag();
     return;
@@ -3169,20 +3647,22 @@ function handleViewerClick(event) {
     return;
   }
 
-  highlightExplodePart(pickedPart);
-  explodeMode = "single";
-  explodeTarget = 1;
-  updateExplodeButton();
-  setStatus(`已选中子结构，单独展开已开启`);
+  activateSingleExplodePart(pickedPart, "已选中子结构，单独展开已开启");
 }
 
 function resetPenInteractionState() {
   lastPenPose = null;
   wasPenPressed = false;
   isPenGrabbingModel = false;
+  isPenGrabbingExplodePart = false;
+  penGrabbedExplodePart = null;
   penGrabStartPose = null;
   penGrabStartRotation = null;
   penGrabHitPointLocal = null;
+  penExplodePartGrabHitPointLocal = null;
+  penExplodePartGrabStartPose = null;
+  penExplodePartGrabStartStylusLocal.set(0, 0, 0);
+  penExplodePartGrabStartDragOffset.set(0, 0, 0);
 }
 
 function getCurrentModelMeshes() {
@@ -3223,9 +3703,22 @@ function updateStylusRay() {
   stylusRaycaster.helper.visible = true;
   stylusRaycaster.updatePose(pen);
 
+  if (isPenGrabbingExplodePart && penGrabbedExplodePart?.object && penExplodePartGrabHitPointLocal) {
+    const lockedHitPoint = penGrabbedExplodePart.object.localToWorld(penExplodePartGrabHitPointLocal.clone());
+    stylusRaycaster.helper.position.copy(lockedHitPoint);
+    const lockedLinePoint = stylusRaycaster.line.worldToLocal(lockedHitPoint.clone());
+    stylusRaycaster.points[1].copy(lockedLinePoint);
+    stylusRaycaster.line.geometry.setFromPoints(stylusRaycaster.points);
+    lastStylusIntersections = [];
+    return;
+  }
+
   if (isPenGrabbingModel && currentObject && penGrabHitPointLocal) {
     const lockedHitPoint = currentObject.localToWorld(penGrabHitPointLocal.clone());
     stylusRaycaster.helper.position.copy(lockedHitPoint);
+    const lockedLinePoint = stylusRaycaster.line.worldToLocal(lockedHitPoint.clone());
+    stylusRaycaster.points[1].copy(lockedLinePoint);
+    stylusRaycaster.line.geometry.setFromPoints(stylusRaycaster.points);
     lastStylusIntersections = [];
     return;
   }
@@ -3247,6 +3740,71 @@ function getStylusPoseInPreviewRoot() {
     position: localPosition,
     quaternion: localQuaternion
   };
+}
+
+function getStylusPositionInObjectParent(object) {
+  if (!stylusRaycaster || !object?.parent) {
+    return null;
+  }
+
+  return object.parent.worldToLocal(stylusRaycaster.line.position.clone());
+}
+
+function getExplodePartFromStylusIntersections() {
+  if (!hasMultipleExplodableParts() || !lastStylusIntersections.length) {
+    return null;
+  }
+
+  return findExplodePartByMesh(lastStylusIntersections[0].object);
+}
+
+function beginPenExplodePartGrab(pen, part) {
+  if (!part?.object || !lastStylusIntersections.length) {
+    return false;
+  }
+
+  const stylusLocal = getStylusPositionInObjectParent(part.object);
+  if (!stylusLocal) {
+    return false;
+  }
+
+  penExplodePartGrabStartPose = {
+    x: pen.pos.x,
+    y: pen.pos.y,
+    z: pen.pos.z
+  };
+  penExplodePartGrabStartStylusLocal.copy(stylusLocal);
+  penExplodePartGrabStartDragOffset.copy(part.dragOffset);
+  penExplodePartGrabHitPointLocal = part.object.worldToLocal(lastStylusIntersections[0].point.clone());
+  penGrabbedExplodePart = part;
+  isPenGrabbingExplodePart = true;
+  isPenGrabbingModel = false;
+  setStatus("笔已抓住子结构：可拖拽当前零件做立体观察");
+  return true;
+}
+
+function updatePenExplodePartGrab(pen) {
+  if (!isPenGrabbingExplodePart || !penGrabbedExplodePart?.object || !penExplodePartGrabStartPose) {
+    return;
+  }
+
+  const stylusLocal = getStylusPositionInObjectParent(penGrabbedExplodePart.object);
+  if (!stylusLocal) {
+    return;
+  }
+
+  const localDelta = stylusLocal.sub(penExplodePartGrabStartStylusLocal);
+  const pullDelta = Math.max(0, penExplodePartGrabStartPose.z - pen.pos.z) * Math.max(penGrabbedExplodePart.distance * 1.2, 0.045);
+
+  penGrabbedExplodePart.dragOffset.copy(penExplodePartGrabStartDragOffset)
+    .add(new THREE.Vector3(
+      localDelta.x * stereoConfig.penMoveScaleX,
+      localDelta.y * stereoConfig.penMoveScaleY,
+      localDelta.z * 1.15
+    ))
+    .addScaledVector(penGrabbedExplodePart.direction, pullDelta);
+
+  applyExplodedLayout();
 }
 
 function beginPenGrab(pen) {
@@ -3314,7 +3872,7 @@ function applyPenManipulation() {
   }
 
   if (!penPressed) {
-    if (isPenGrabbingModel || wasPenPressed) {
+    if (isPenGrabbingExplodePart || isPenGrabbingModel || wasPenPressed) {
       setStatus("裸眼 3D 笔追已松开");
     }
     resetPenInteractionState();
@@ -3328,12 +3886,19 @@ function applyPenManipulation() {
       y: pen.pos.y,
       z: pen.pos.z
     };
-    if (!beginPenGrab(pen)) {
+    const hitPart = getExplodePartFromStylusIntersections();
+    if (hitPart && activateSingleExplodePart(hitPart, "笔已命中子结构，正在切换到单独展开")) {
+      if (!beginPenExplodePartGrab(pen, hitPart)) {
+        setStatus("笔已命中子结构，但暂时无法抓取，请稍微移动后重试");
+      }
+    } else if (!beginPenGrab(pen)) {
       setStatus("笔已按下：请用射线命中模型后再抓取");
     }
   }
 
-  if (isPenGrabbingModel) {
+  if (isPenGrabbingExplodePart) {
+    updatePenExplodePartGrab(pen);
+  } else if (isPenGrabbingModel) {
     updatePenGrab(pen);
   }
 
@@ -3646,9 +4211,15 @@ function normalizeRequestErrorMessage(message, details) {
   const detailText = JSON.stringify(details || {});
   const isBusyError = text.includes("The server is busy. Please try again later.")
     || detailText.includes("The server is busy. Please try again later.");
+  const isMissingRouteError = text.includes("API route not found")
+    || detailText.includes("API route not found");
 
   if (isBusyError) {
     return "Meshy 当前服务繁忙，请稍后重试。建议先切换到 Tripo3D，或过 1-2 分钟再提交。";
+  }
+
+  if (isMissingRouteError) {
+    return "当前运行中的服务还没有加载最新的 AI模型优化接口。请重启本地 Node 服务后再试。";
   }
 
   return text || "请求失败";

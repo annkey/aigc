@@ -48,6 +48,25 @@
       </section>
 
       <main class="grid">
+        <section class="workspace-switch-panel panel full-span">
+          <div class="panel-head compact-head">
+            <h2>工作台</h2>
+            <p>生成模型和优化模型分开操作，避免流程互相干扰。</p>
+          </div>
+          <div class="mode-switch workspace-switch" role="tablist" aria-label="工作台切换">
+            <label class="mode-option workspace-option active">
+              <input type="radio" name="workspace" value="generator" checked />
+              <span>3D模型生成</span>
+            </label>
+            <label class="mode-option workspace-option">
+              <input type="radio" name="workspace" value="optimizer" />
+              <span>AI模型优化</span>
+            </label>
+          </div>
+        </section>
+      </main>
+
+      <main id="generator-workspace" class="grid workspace-grid">
         <section class="panel">
           <div class="panel-head">
             <h2>创建生成任务</h2>
@@ -168,6 +187,186 @@
 
           <div id="download-links" class="download-links hidden"></div>
           <pre id="result-json" class="result-json hidden"></pre>
+        </section>
+      </main>
+
+      <main id="optimizer-workspace" class="grid workspace-grid hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>AI模型优化</h2>
+            <p id="optimizer-description">上传已有模型后，可以对模型执行 AI 贴图或 AI 拆模型流程。</p>
+          </div>
+
+          <form id="optimizer-form" class="generator-form">
+            <div class="mode-switch" role="tablist" aria-label="优化平台">
+              <label class="mode-option optimizer-provider-option active">
+                <input type="radio" name="optimizerProvider" value="meshy" checked />
+                <span>Meshy</span>
+              </label>
+              <label class="mode-option optimizer-provider-option">
+                <input type="radio" name="optimizerProvider" value="tripo" />
+                <span>Tripo3D</span>
+              </label>
+            </div>
+
+            <div class="mode-switch" role="tablist" aria-label="优化类型">
+              <label class="mode-option optimizer-operation-option active">
+                <input type="radio" name="optimizerOperation" value="retexture" checked />
+                <span>AI贴图</span>
+              </label>
+              <label class="mode-option optimizer-operation-option">
+                <input type="radio" name="optimizerOperation" value="split" />
+                <span>AI拆模型</span>
+              </label>
+            </div>
+
+            <div id="optimizer-capability-note" class="capability-note">
+              当前默认接入 Meshy 的公开 Retexture API，适合已有模型重新贴图。
+            </div>
+
+            <div class="field-group">
+              <label class="field upload-drop" for="modelFile">
+                <span>模型文件</span>
+                <input
+                  id="modelFile"
+                  name="modelFile"
+                  type="file"
+                  accept=".glb,.gltf,.fbx,.obj,.stl"
+                />
+                <strong>点击上传已有模型</strong>
+                <small>支持 GLB / GLTF / FBX / OBJ / STL。也可以直接填写下方模型 URL。</small>
+              </label>
+              <label class="field">
+                <span>模型 URL（可选）</span>
+                <input
+                  id="modelUrl"
+                  name="modelUrl"
+                  type="url"
+                  placeholder="例如：https://example.com/models/chair.glb"
+                />
+              </label>
+            </div>
+
+            <div class="field-row">
+              <label class="field">
+                <span>优化模型版本</span>
+                <select id="optimizerModelVersion" name="optimizerModelVersion"></select>
+              </label>
+              <label class="field">
+                <span>输出目标</span>
+                <select id="optimizerTarget" name="optimizerTarget">
+                  <option value="preview">用于网页预览</option>
+                  <option value="editing">用于继续编辑</option>
+                  <option value="teaching">用于教学展示</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>结果保存策略</span>
+                <select id="optimizerSaveMode" name="optimizerSaveMode">
+                  <option value="new_revision">生成新模型版本</option>
+                  <option value="draft">生成草稿结果</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="optimizer-texture-fields" class="field-group">
+              <label class="field">
+                <span>贴图风格提示词</span>
+                <textarea
+                  id="texturePrompt"
+                  name="texturePrompt"
+                  rows="4"
+                  placeholder="例如：红铜金属机身，边缘有轻微磨损，法线细节清晰，适合实时渲染"
+                ></textarea>
+              </label>
+              <label class="field upload-drop" for="styleImage">
+                <span>风格参考图（可选）</span>
+                <input id="styleImage" name="styleImage" type="file" accept="image/png,image/jpeg,image/webp" />
+                <strong>点击上传风格参考图</strong>
+                <small>如果同时填写提示词和图片，将优先使用图片作为贴图风格参考。</small>
+              </label>
+              <div id="style-image-preview" class="image-preview hidden"></div>
+              <div class="field-row checkbox-row">
+                <label class="check-field">
+                  <input id="preserveUv" name="preserveUv" type="checkbox" checked />
+                  <span>保留原始 UV</span>
+                </label>
+                <label class="check-field">
+                  <input id="enablePbr" name="enablePbr" type="checkbox" checked />
+                  <span>生成 PBR 贴图</span>
+                </label>
+                <label class="check-field">
+                  <input id="removeLighting" name="removeLighting" type="checkbox" checked />
+                  <span>去除 baked 光照</span>
+                </label>
+              </div>
+            </div>
+
+            <div id="optimizer-split-fields" class="field-group hidden">
+              <label class="field">
+                <span>拆分目标说明</span>
+                <textarea
+                  id="splitPrompt"
+                  name="splitPrompt"
+                  rows="4"
+                  placeholder="例如：将机器人自动拆成头部、躯干、左右手臂、左右腿和武器配件，便于后续编辑与教学展示"
+                ></textarea>
+              </label>
+              <label class="field">
+                <span>拆分策略</span>
+                <select id="splitStrategy" name="splitStrategy">
+                  <option value="semantic">按语义部件拆分</option>
+                  <option value="assembly">按装配结构拆分</option>
+                  <option value="teaching">按教学步骤拆分</option>
+                </select>
+              </label>
+            </div>
+
+            <button id="optimizer-submit-button" class="primary-btn" type="submit">开始 AI 模型优化</button>
+          </form>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-head">
+            <h2>优化结果</h2>
+            <p>支持查看状态、预览优化后的模型，并获取下载链接。</p>
+          </div>
+
+          <div id="optimizer-status-card" class="status-card idle">
+            <div>
+              <span class="status-label">当前状态</span>
+              <strong id="optimizer-status-text">等待提交</strong>
+            </div>
+            <div>
+              <span class="status-label">进度</span>
+              <strong id="optimizer-progress-text">0%</strong>
+            </div>
+          </div>
+
+          <div class="progress-bar">
+            <div id="optimizer-progress-fill" class="progress-fill"></div>
+          </div>
+
+          <div id="optimizer-task-meta" class="task-meta hidden"></div>
+
+          <div id="optimizer-preview-wrap" class="preview-wrap hidden">
+            <div class="viewer-wrap hidden" id="optimizer-viewer-wrap">
+              <model-viewer
+                id="optimizer-model-viewer"
+                camera-controls
+                auto-rotate
+                shadow-intensity="1"
+                exposure="1"
+                interaction-prompt="auto"
+              ></model-viewer>
+            </div>
+            <div class="render-wrap hidden" id="optimizer-render-wrap">
+              <img id="optimizer-render-image" alt="优化预览图" />
+            </div>
+          </div>
+
+          <div id="optimizer-download-links" class="download-links hidden"></div>
+          <pre id="optimizer-result-json" class="result-json hidden"></pre>
         </section>
       </main>
     </div>

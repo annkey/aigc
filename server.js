@@ -38,6 +38,7 @@ const NORMALIZED_FINAL_STATUSES = new Set([
 
 const meshyTaskContexts = new Map();
 const meshyRefineTasks = new Map();
+const optimizationTaskContexts = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -71,6 +72,27 @@ const GENERATOR_PROVIDER_OPTIONS = {
       { value: "meshy-6", label: "meshy-6" },
       { value: "meshy-5", label: "meshy-5" }
     ]
+  }
+};
+
+const OPTIMIZATION_PROVIDER_OPTIONS = {
+  tripo: {
+    name: "Tripo3D",
+    defaultModelVersion: "P1-20260311",
+    modelVersions: GENERATOR_PROVIDER_OPTIONS.tripo.modelVersions,
+    operations: {
+      retexture: false,
+      split: false
+    }
+  },
+  meshy: {
+    name: "Meshy",
+    defaultModelVersion: "latest",
+    modelVersions: GENERATOR_PROVIDER_OPTIONS.meshy.modelVersions,
+    operations: {
+      retexture: true,
+      split: false
+    }
   }
 };
 
@@ -135,9 +157,12 @@ async function handleApi(req, res, requestUrl) {
       const request = toWebRequest(req, requestUrl);
       const form = await request.formData();
       const generatorSettings = getGeneratorSettings();
-      form.set("provider", generatorSettings.provider);
-      form.set("modelVersion", generatorSettings.modelVersion);
-      const provider = generatorSettings.provider;
+      const providers = buildProviderConfigMap();
+      const requestedProvider = normalizeProvider(form.get("provider"));
+      const provider = providers[requestedProvider]?.enabled ? requestedProvider : generatorSettings.provider;
+      const modelVersion = resolveModelVersion(provider, form.get("modelVersion"), providers);
+      form.set("provider", provider);
+      form.set("modelVersion", modelVersion);
 
       if (GENERATOR_API_BASE) {
         const remoteResult = await proxyRemoteJson("/api/generate", {
@@ -162,6 +187,42 @@ async function handleApi(req, res, requestUrl) {
       sendJson(res, error.status || 400, {
         error: "GenerationFailed",
         message: error.message || "Failed to create task.",
+        details: error.details || null
+      });
+      return;
+    }
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/model-optimize") {
+    try {
+      const request = toWebRequest(req, requestUrl);
+      const form = await request.formData();
+
+      if (GENERATOR_API_BASE) {
+        try {
+          const remoteResult = await proxyRemoteJson("/api/model-optimize", {
+            method: "POST",
+            body: form
+          });
+          sendJson(res, 200, {
+            ...remoteResult,
+            generatorApiBase: GENERATOR_API_BASE,
+            proxied: true
+          });
+          return;
+        } catch (error) {
+          if (error.status && error.status !== 404 && error.status !== 501) {
+            throw error;
+          }
+        }
+      }
+
+      await handleModelOptimize(res, form);
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "ModelOptimizeFailed",
+        message: error.message || "Failed to create optimization task.",
         details: error.details || null
       });
       return;
@@ -201,6 +262,50 @@ async function handleApi(req, res, requestUrl) {
       sendJson(res, error.status || 400, {
         error: "TaskQueryFailed",
         message: error.message || "Failed to query task.",
+        details: error.details || null
+      });
+      return;
+    }
+  }
+
+  if (req.method === "GET" && requestUrl.pathname.startsWith("/api/model-optimize/task/")) {
+    const taskId = requestUrl.pathname.split("/").pop();
+    const provider = normalizeProvider(requestUrl.searchParams.get("provider"));
+    const operation = normalizeOptimizationOperation(requestUrl.searchParams.get("operation"));
+
+    if (!taskId) {
+      sendJson(res, 400, {
+        error: "ValidationError",
+        message: "Missing optimization task id."
+      });
+      return;
+    }
+
+    try {
+      if (GENERATOR_API_BASE) {
+        try {
+          const remoteTask = await proxyRemoteJson(
+            `/api/model-optimize/task/${encodeURIComponent(taskId)}?provider=${encodeURIComponent(provider)}&operation=${encodeURIComponent(operation)}`
+          );
+          sendJson(res, 200, {
+            ...remoteTask,
+            generatorApiBase: GENERATOR_API_BASE,
+            proxied: true
+          });
+          return;
+        } catch (error) {
+          if (error.status && error.status !== 404 && error.status !== 501) {
+            throw error;
+          }
+        }
+      }
+
+      await handleModelOptimizeTaskQuery(res, taskId, provider, operation);
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "ModelOptimizeTaskQueryFailed",
+        message: error.message || "Failed to query optimization task.",
         details: error.details || null
       });
       return;
@@ -481,6 +586,170 @@ async function handleMeshyTaskQuery(res, taskId) {
   }
 
   sendJson(res, 200, normalized);
+}
+
+async function handleModelOptimize(res, form) {
+  const provider = normalizeProvider(form.get("provider"));
+  const operation = normalizeOptimizationOperation(form.get("operation"));
+
+  if (provider === "meshy" && operation === "retexture") {
+    await handleMeshyRetexture(res, form);
+    return;
+  }
+
+  const error = new Error(buildUnsupportedOptimizationMessage(provider, operation));
+  error.status = 400;
+  error.details = {
+    provider,
+    operation,
+    support: buildOptimizationConfigMap().providers?.[provider]?.operations?.[operation] || null
+  };
+  throw error;
+}
+
+async function handleModelOptimizeTaskQuery(res, taskId, provider, operation) {
+  if (provider === "meshy" && operation === "retexture") {
+    await handleMeshyRetextureTaskQuery(res, taskId);
+    return;
+  }
+
+  const error = new Error(buildUnsupportedOptimizationMessage(provider, operation));
+  error.status = 400;
+  error.details = {
+    provider,
+    operation,
+    taskId
+  };
+  throw error;
+}
+
+async function handleMeshyRetexture(res, form) {
+  ensureProviderEnabled("meshy");
+
+  const modelVersion = String(form.get("modelVersion") || "latest");
+  const modelUrl = normalizeText(form.get("modelUrl"));
+  const modelFile = form.get("modelFile");
+  const texturePrompt = normalizeText(form.get("texturePrompt"));
+  const styleImage = form.get("styleImage");
+  const target = normalizeText(form.get("target")) || "preview";
+  const saveMode = normalizeText(form.get("saveMode")) || "new_revision";
+  const preserveUv = parseBoolean(form.get("preserveUv"), true);
+  const enablePbr = parseBoolean(form.get("enablePbr"), true);
+  const removeLighting = parseBoolean(form.get("removeLighting"), true);
+
+  let sourceUrl = modelUrl;
+  if (!(sourceUrl && isHttpUrl(sourceUrl))) {
+    sourceUrl = "";
+  }
+
+  if (!sourceUrl) {
+    if (!(modelFile instanceof File) || modelFile.size === 0) {
+      const error = new Error("Retexture requires a model file or a valid model URL.");
+      error.status = 400;
+      throw error;
+    }
+
+    sourceUrl = await fileToDataUri(modelFile, getMimeTypeForModelFile(modelFile));
+  }
+
+  const payload = {
+    model_url: sourceUrl,
+    ai_model: modelVersion,
+    enable_original_uv: preserveUv,
+    enable_pbr: enablePbr,
+    remove_lighting: removeLighting
+  };
+
+  if (texturePrompt) {
+    payload.text_style_prompt = texturePrompt;
+  }
+
+  if (styleImage instanceof File && styleImage.size > 0) {
+    payload.image_url = await fileToDataUri(styleImage);
+  }
+
+  const meshyResponse = await meshyFetch("/openapi/v1/retexture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const taskId = meshyResponse.result || meshyResponse.id || null;
+  if (taskId) {
+    optimizationTaskContexts.set(taskId, {
+      provider: "meshy",
+      operation: "retexture",
+      modelVersion,
+      target,
+      saveMode
+    });
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    provider: "meshy",
+    providerName: "Meshy",
+    operation: "retexture",
+    taskId,
+    displayModelVersion: modelVersion,
+    target,
+    saveMode,
+    payload,
+    raw: meshyResponse
+  });
+}
+
+async function handleMeshyRetextureTaskQuery(res, taskId) {
+  ensureProviderEnabled("meshy");
+
+  const context = optimizationTaskContexts.get(taskId) || null;
+  const task = await meshyFetch(`/openapi/v1/retexture/${taskId}`, { method: "GET" });
+
+  sendJson(res, 200, normalizeMeshyRetextureTask(task, context, taskId));
+}
+
+function normalizeMeshyRetextureTask(task, context, fallbackTaskId) {
+  const rawUrls = task.model_urls || {};
+  const normalizedStatus = normalizeMeshyStatus(task.status);
+  const taskId = task.id || fallbackTaskId;
+
+  return {
+    ok: true,
+    provider: "meshy",
+    providerName: "Meshy",
+    operation: "retexture",
+    taskId,
+    type: task.type || "retexture",
+    status: normalizedStatus,
+    statusText: task.task_error?.message || normalizedStatus,
+    progress: typeof task.progress === "number" ? task.progress : 0,
+    finalized: NORMALIZED_FINAL_STATUSES.has(normalizedStatus),
+    stageText: "Meshy AI贴图任务",
+    displayModelVersion: context?.modelVersion || task.ai_model || "latest",
+    input: {
+      textStylePrompt: task.text_style_prompt || "",
+      imageUrl: task.image_url || "",
+      target: context?.target || "preview",
+      saveMode: context?.saveMode || "new_revision"
+    },
+    output: rawUrls,
+    renderedImage: task.thumbnail_url || null,
+    preferredModelUrl:
+      rawUrls.glb ||
+      rawUrls.fbx ||
+      rawUrls.obj ||
+      rawUrls.stl ||
+      null,
+    modelUrls: {
+      glb: rawUrls.glb || null,
+      fbx: rawUrls.fbx || null,
+      obj: rawUrls.obj || null,
+      mtl: rawUrls.mtl || null,
+      stl: rawUrls.stl || null
+    },
+    downloadItems: buildMeshyDownloadItems(rawUrls, task.thumbnail_url),
+    raw: task
+  };
 }
 
 async function ensureMeshyRefineTask(previewTaskId, context) {
@@ -781,10 +1050,11 @@ function inferAssetContentType(ext) {
   return map[ext] || "application/octet-stream";
 }
 
-async function fileToDataUri(file) {
+async function fileToDataUri(file, mimeTypeOverride = "") {
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  return `data:${file.type};base64,${buffer.toString("base64")}`;
+  const mimeType = mimeTypeOverride || file.type || "application/octet-stream";
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }
 
 function ensureProviderEnabled(provider) {
@@ -803,6 +1073,44 @@ function ensureProviderEnabled(provider) {
 
 function normalizeProvider(value) {
   return String(value || "tripo").toLowerCase() === "meshy" ? "meshy" : "tripo";
+}
+
+function normalizeOptimizationOperation(value) {
+  return String(value || "retexture").toLowerCase() === "split" ? "split" : "retexture";
+}
+
+function parseBoolean(value, fallback = false) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function isHttpUrl(value) {
+  try {
+    const target = new URL(String(value));
+    return target.protocol === "http:" || target.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function getMimeTypeForModelFile(file) {
+  const ext = path.extname(file.name || "").toLowerCase();
+  return inferAssetContentType(ext);
+}
+
+function buildUnsupportedOptimizationMessage(provider, operation) {
+  if (operation === "split") {
+    return `${provider === "tripo" ? "Tripo3D" : "Meshy"} 的 AI拆模型流程已在页面和接口上预留，但当前本地运行时尚未接入公开可用的拆件服务。`;
+  }
+
+  if (provider === "tripo") {
+    return "Tripo3D 的 AI贴图流程已在页面和接口上预留，但当前本地运行时尚未接入公开开发者端点。";
+  }
+
+  return "当前优化能力不可用。";
 }
 
 function normalizeMeshyStatus(status) {
@@ -880,13 +1188,15 @@ function buildMeshyDownloadItems(modelUrls, thumbnailUrl) {
 function buildLocalGeneratorConfigResponse() {
   const providers = buildProviderConfigMap();
   const generatorSettings = getGeneratorSettings(providers);
+  const optimization = buildOptimizationConfigMap();
 
   return {
     ok: true,
     generatorApiBase: "",
     proxied: false,
     providers,
-    generatorSettings
+    generatorSettings,
+    optimization
   };
 }
 
@@ -904,6 +1214,41 @@ function buildProviderConfigMap() {
       name: GENERATOR_PROVIDER_OPTIONS.meshy.name,
       defaultModelVersion: GENERATOR_PROVIDER_OPTIONS.meshy.defaultModelVersion,
       modelVersions: GENERATOR_PROVIDER_OPTIONS.meshy.modelVersions
+    }
+  };
+}
+
+function buildOptimizationConfigMap() {
+  return {
+    providers: {
+      tripo: {
+        enabled: Boolean(TRIPO_API_KEY),
+        name: OPTIMIZATION_PROVIDER_OPTIONS.tripo.name,
+        defaultModelVersion: OPTIMIZATION_PROVIDER_OPTIONS.tripo.defaultModelVersion,
+        modelVersions: OPTIMIZATION_PROVIDER_OPTIONS.tripo.modelVersions,
+        operations: {
+          retexture: {
+            enabled: false
+          },
+          split: {
+            enabled: false
+          }
+        }
+      },
+      meshy: {
+        enabled: Boolean(MESHY_API_KEY),
+        name: OPTIMIZATION_PROVIDER_OPTIONS.meshy.name,
+        defaultModelVersion: OPTIMIZATION_PROVIDER_OPTIONS.meshy.defaultModelVersion,
+        modelVersions: OPTIMIZATION_PROVIDER_OPTIONS.meshy.modelVersions,
+        operations: {
+          retexture: {
+            enabled: Boolean(MESHY_API_KEY)
+          },
+          split: {
+            enabled: false
+          }
+        }
+      }
     }
   };
 }

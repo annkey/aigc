@@ -1,17 +1,5 @@
-﻿const form = document.getElementById("generator-form");
+const form = document.getElementById("generator-form");
 const submitButton = document.getElementById("submit-button");
-const statusCard = document.getElementById("status-card");
-const statusText = document.getElementById("status-text");
-const progressText = document.getElementById("progress-text");
-const progressFill = document.getElementById("progress-fill");
-const taskMeta = document.getElementById("task-meta");
-const previewWrap = document.getElementById("preview-wrap");
-const viewerWrap = document.getElementById("viewer-wrap");
-const renderWrap = document.getElementById("render-wrap");
-const modelViewer = document.getElementById("model-viewer");
-const renderImage = document.getElementById("render-image");
-const downloadLinks = document.getElementById("download-links");
-const resultJson = document.getElementById("result-json");
 const imageInput = document.getElementById("image");
 const imagePreview = document.getElementById("image-preview");
 const textFields = document.getElementById("text-fields");
@@ -30,6 +18,30 @@ const modelVersionSelect = document.getElementById("modelVersion");
 const textureQualitySelect = document.getElementById("textureQuality");
 const geometryQualitySelect = document.getElementById("geometryQuality");
 const negativePromptInput = document.getElementById("negativePrompt");
+const workspaceOptions = Array.from(document.querySelectorAll('.workspace-option input[name="workspace"]'));
+const generatorWorkspace = document.getElementById("generator-workspace");
+const optimizerWorkspace = document.getElementById("optimizer-workspace");
+
+const optimizerForm = document.getElementById("optimizer-form");
+const optimizerSubmitButton = document.getElementById("optimizer-submit-button");
+const optimizerCapabilityNote = document.getElementById("optimizer-capability-note");
+const optimizerProviderOptions = Array.from(document.querySelectorAll('.optimizer-provider-option input[name="optimizerProvider"]'));
+const optimizerOperationOptions = Array.from(document.querySelectorAll('.optimizer-operation-option input[name="optimizerOperation"]'));
+const textureFields = document.getElementById("optimizer-texture-fields");
+const splitFields = document.getElementById("optimizer-split-fields");
+const modelFileInput = document.getElementById("modelFile");
+const modelUrlInput = document.getElementById("modelUrl");
+const optimizerModelVersionSelect = document.getElementById("optimizerModelVersion");
+const optimizerTargetSelect = document.getElementById("optimizerTarget");
+const optimizerSaveModeSelect = document.getElementById("optimizerSaveMode");
+const texturePromptInput = document.getElementById("texturePrompt");
+const styleImageInput = document.getElementById("styleImage");
+const styleImagePreview = document.getElementById("style-image-preview");
+const preserveUvInput = document.getElementById("preserveUv");
+const enablePbrInput = document.getElementById("enablePbr");
+const removeLightingInput = document.getElementById("removeLighting");
+const splitPromptInput = document.getElementById("splitPrompt");
+const splitStrategyInput = document.getElementById("splitStrategy");
 
 const PROVIDER_CONFIG = {
   tripo: {
@@ -88,45 +100,198 @@ const PROVIDER_CONFIG = {
   }
 };
 
-let activePoller = null;
+const OPTIMIZER_PROVIDER_CONFIG = {
+  meshy: {
+    name: "Meshy",
+    operationNotes: {
+      retexture: "当前默认接入 Meshy 的公开 Retexture API，适合已有模型重新贴图。",
+      split: "当前页面已预留 AI 拆模型流程；本地默认环境未内置公开拆件 API，如接入远程优化服务后可直接打通。"
+    }
+  },
+  tripo: {
+    name: "Tripo3D",
+    operationNotes: {
+      retexture: "Tripo 官方公开展示了 AI Texturing 能力，但当前本地版本未直接接入公开开发者端点。",
+      split: "Tripo 官方公开展示了 Intelligent Segmentation 能力；如果后端接入远程优化服务，本页面可直接承接拆模型流程。"
+    }
+  }
+};
+
+let runtimeConfig = null;
+let activeGeneratorPoller = null;
+let activeOptimizerPoller = null;
 let currentTaskContext = null;
+let currentOptimizationContext = null;
+
+const generatorResult = createResultController({
+  statusCard: document.getElementById("status-card"),
+  statusText: document.getElementById("status-text"),
+  progressText: document.getElementById("progress-text"),
+  progressFill: document.getElementById("progress-fill"),
+  taskMeta: document.getElementById("task-meta"),
+  previewWrap: document.getElementById("preview-wrap"),
+  viewerWrap: document.getElementById("viewer-wrap"),
+  renderWrap: document.getElementById("render-wrap"),
+  modelViewer: document.getElementById("model-viewer"),
+  renderImage: document.getElementById("render-image"),
+  downloadLinks: document.getElementById("download-links"),
+  resultJson: document.getElementById("result-json")
+});
+
+const optimizerResult = createResultController({
+  statusCard: document.getElementById("optimizer-status-card"),
+  statusText: document.getElementById("optimizer-status-text"),
+  progressText: document.getElementById("optimizer-progress-text"),
+  progressFill: document.getElementById("optimizer-progress-fill"),
+  taskMeta: document.getElementById("optimizer-task-meta"),
+  previewWrap: document.getElementById("optimizer-preview-wrap"),
+  viewerWrap: document.getElementById("optimizer-viewer-wrap"),
+  renderWrap: document.getElementById("optimizer-render-wrap"),
+  modelViewer: document.getElementById("optimizer-model-viewer"),
+  renderImage: document.getElementById("optimizer-render-image"),
+  downloadLinks: document.getElementById("optimizer-download-links"),
+  resultJson: document.getElementById("optimizer-result-json")
+});
 
 bootstrap();
 
 async function bootstrap() {
+  bindWorkspaceSwitch();
   bindProviderSwitch();
   bindModeSwitch();
   bindImagePreview();
-  bindModelViewer();
+  bindModelViewer(generatorResult.modelViewer, generatorResult.viewerWrap, generatorResult.previewWrap);
+
+  bindOptimizerSwitches();
+  bindOptimizerPreview();
+  bindModelViewer(optimizerResult.modelViewer, optimizerResult.viewerWrap, optimizerResult.previewWrap);
 
   modelVersionSelect.addEventListener("change", updateHeroBadges);
 
   try {
-    const config = await fetchJson("/api/config");
-    applyProviderConfig(getCurrentProvider(), config);
+    runtimeConfig = await fetchJson("/api/config");
   } catch {
-    applyProviderConfig(getCurrentProvider());
-    setStatus("服务启动异常，请检查后端配置。", 0, "error");
+    runtimeConfig = null;
+    generatorResult.setStatus("服务启动异常，请检查后端配置。", 0, "error");
   }
 
-  form.addEventListener("submit", handleSubmit);
+  applyProviderConfig(getCurrentProvider(), runtimeConfig);
+  applyOptimizerState(runtimeConfig);
+
+  form.addEventListener("submit", handleGeneratorSubmit);
+  optimizerForm.addEventListener("submit", handleOptimizerSubmit);
+}
+
+function createResultController(elements) {
+  return {
+    ...elements,
+    setStatus(text, progress, tone) {
+      elements.statusText.textContent = formatStatus(text);
+      elements.progressText.textContent = `${Math.max(0, Math.min(100, Math.round(progress)))}%`;
+      elements.progressFill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
+      elements.statusCard.className = `status-card ${tone || "idle"}`;
+    },
+    renderTaskMeta(taskId, context, stageText = "") {
+      elements.taskMeta.innerHTML = "";
+      elements.taskMeta.append(
+        createPill(`Task ID: ${taskId}`),
+        createPill(`Provider: ${context.providerName}`),
+        createPill(`Operation: ${context.operationLabel || context.mode}`),
+        createPill(`Model: ${context.modelVersion || "-"}`)
+      );
+
+      if (stageText) {
+        elements.taskMeta.append(createPill(stageText));
+      }
+
+      elements.taskMeta.classList.remove("hidden");
+    },
+    renderTask(task) {
+      elements.resultJson.textContent = JSON.stringify(task.raw, null, 2);
+      elements.resultJson.classList.remove("hidden");
+
+      const modelUrl = getPreviewModelUrl(task);
+      const renderedImageUrl = task.renderedImage;
+
+      elements.previewWrap.classList.add("hidden");
+      elements.viewerWrap.classList.add("hidden");
+      elements.renderWrap.classList.add("hidden");
+
+      if (modelUrl) {
+        elements.modelViewer.src = modelUrl;
+        elements.viewerWrap.classList.remove("hidden");
+        elements.previewWrap.classList.remove("hidden");
+      } else {
+        elements.modelViewer.removeAttribute("src");
+      }
+
+      if (renderedImageUrl) {
+        elements.renderImage.src = renderedImageUrl;
+        elements.renderWrap.classList.remove("hidden");
+        elements.previewWrap.classList.remove("hidden");
+      } else {
+        elements.renderImage.removeAttribute("src");
+      }
+
+      const links = [];
+      for (const item of task.downloadItems || []) {
+        if (item?.url) {
+          links.push(linkMarkup(item.label, item.url));
+        }
+      }
+
+      if (links.length > 0) {
+        elements.downloadLinks.innerHTML = links.join("");
+        elements.downloadLinks.classList.remove("hidden");
+      } else {
+        elements.downloadLinks.innerHTML = "";
+        elements.downloadLinks.classList.add("hidden");
+      }
+    },
+    reset() {
+      elements.taskMeta.innerHTML = "";
+      elements.taskMeta.classList.add("hidden");
+      elements.previewWrap.classList.add("hidden");
+      elements.viewerWrap.classList.add("hidden");
+      elements.renderWrap.classList.add("hidden");
+      elements.downloadLinks.innerHTML = "";
+      elements.downloadLinks.classList.add("hidden");
+      elements.resultJson.textContent = "";
+      elements.resultJson.classList.add("hidden");
+      elements.modelViewer.removeAttribute("src");
+      elements.renderImage.removeAttribute("src");
+    }
+  };
+}
+
+function bindWorkspaceSwitch() {
+  for (const input of workspaceOptions) {
+    input.addEventListener("change", () => {
+      updateOptionVisuals();
+      const workspace = getCurrentWorkspace();
+      generatorWorkspace.classList.toggle("hidden", workspace !== "generator");
+      optimizerWorkspace.classList.toggle("hidden", workspace !== "optimizer");
+    });
+  }
 }
 
 function bindProviderSwitch() {
   for (const input of providerOptions) {
     input.addEventListener("change", async () => {
       updateOptionVisuals();
-      resetResultBlocks();
-      clearPoller();
+      generatorResult.reset();
+      clearGeneratorPoller();
       currentTaskContext = null;
-      setStatus("等待提交", 0, "idle");
+      generatorResult.setStatus("等待提交", 0, "idle");
 
       try {
-        const config = await fetchJson("/api/config");
-        applyProviderConfig(getCurrentProvider(), config);
+        runtimeConfig = await fetchJson("/api/config");
       } catch {
-        applyProviderConfig(getCurrentProvider());
+        runtimeConfig = runtimeConfig || null;
       }
+
+      applyProviderConfig(getCurrentProvider(), runtimeConfig);
+      applyOptimizerState(runtimeConfig);
     });
   }
 }
@@ -143,21 +308,30 @@ function bindModeSwitch() {
 }
 
 function bindImagePreview() {
-  imageInput.addEventListener("change", () => {
-    const file = imageInput.files?.[0];
-    if (!file) {
-      imagePreview.classList.add("hidden");
-      imagePreview.innerHTML = "";
-      return;
-    }
-
-    const url = URL.createObjectURL(file);
-    imagePreview.innerHTML = `<img src="${url}" alt="上传预览图">`;
-    imagePreview.classList.remove("hidden");
-  });
+  imageInput.addEventListener("change", () => renderImagePreview(imageInput, imagePreview));
 }
 
-function bindModelViewer() {
+function bindOptimizerPreview() {
+  styleImageInput.addEventListener("change", () => renderImagePreview(styleImageInput, styleImagePreview));
+}
+
+function bindOptimizerSwitches() {
+  for (const input of optimizerProviderOptions) {
+    input.addEventListener("change", () => {
+      updateOptionVisuals();
+      applyOptimizerState(runtimeConfig);
+    });
+  }
+
+  for (const input of optimizerOperationOptions) {
+    input.addEventListener("change", () => {
+      updateOptionVisuals();
+      applyOptimizerState(runtimeConfig);
+    });
+  }
+}
+
+function bindModelViewer(modelViewer, viewerWrap, previewWrap) {
   modelViewer.addEventListener("load", () => {
     viewerWrap.classList.remove("hidden");
     previewWrap.classList.remove("hidden");
@@ -166,6 +340,19 @@ function bindModelViewer() {
   modelViewer.addEventListener("error", () => {
     viewerWrap.classList.add("hidden");
   });
+}
+
+function renderImagePreview(input, container) {
+  const file = input.files?.[0];
+  if (!file) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+
+  const url = URL.createObjectURL(file);
+  container.innerHTML = `<img src="${url}" alt="上传预览图">`;
+  container.classList.remove("hidden");
 }
 
 function applyProviderConfig(provider, config = null) {
@@ -192,6 +379,36 @@ function applyProviderConfig(provider, config = null) {
 
   updateHeroBadges();
   updateOptionVisuals();
+}
+
+function applyOptimizerState(config = null) {
+  const provider = getCurrentOptimizerProvider();
+  const operation = getCurrentOptimizerOperation();
+  const providerConfig = OPTIMIZER_PROVIDER_CONFIG[provider] || OPTIMIZER_PROVIDER_CONFIG.meshy;
+  const capability = config?.optimization?.providers?.[provider]?.operations?.[operation];
+  const modelVersionOptions = config?.optimization?.providers?.[provider]?.modelVersions
+    || PROVIDER_CONFIG[provider]?.modelVersions
+    || PROVIDER_CONFIG.meshy.modelVersions;
+
+  textureFields.classList.toggle("hidden", operation !== "retexture");
+  splitFields.classList.toggle("hidden", operation !== "split");
+
+  const noteSuffix = capability?.enabled
+    ? "当前环境可直接提交。"
+    : "当前环境会给出明确提示，不会静默失败。";
+  optimizerCapabilityNote.textContent = `${providerConfig.operationNotes[operation]} ${noteSuffix}`;
+
+  optimizerSubmitButton.textContent = operation === "retexture" ? "开始 AI 贴图" : "开始 AI 拆模型";
+  fillOptimizerModelVersion(modelVersionOptions, provider);
+}
+
+function fillOptimizerModelVersion(modelVersions, provider) {
+  const activeProviderConfig = PROVIDER_CONFIG[provider] || PROVIDER_CONFIG.meshy;
+  fillSelect(
+    optimizerModelVersionSelect,
+    modelVersions,
+    optimizerModelVersionSelect.value || activeProviderConfig.defaultModelVersion
+  );
 }
 
 function fillSelect(select, options, selectedValue) {
@@ -228,7 +445,7 @@ function updateOptionVisuals() {
   }
 }
 
-async function handleSubmit(event) {
+async function handleGeneratorSubmit(event) {
   event.preventDefault();
 
   const provider = getCurrentProvider();
@@ -246,7 +463,7 @@ async function handleSubmit(event) {
     const secondaryText = negativePromptInput.value.trim();
 
     if (!prompt) {
-      setStatus("请输入文本提示词。", 0, "error");
+      generatorResult.setStatus("请输入文本提示词。", 0, "error");
       return;
     }
 
@@ -255,16 +472,16 @@ async function handleSubmit(event) {
   } else {
     const file = imageInput.files?.[0];
     if (!file) {
-      setStatus("请先上传一张参考图片。", 0, "error");
+      generatorResult.setStatus("请先上传一张参考图片。", 0, "error");
       return;
     }
     payload.append("image", file);
   }
 
-  clearPoller();
-  resetResultBlocks();
-  setBusy(true, providerConfig.name);
-  setStatus(`任务已提交，正在创建 ${providerConfig.name} 任务...`, 5, "running");
+  clearGeneratorPoller();
+  generatorResult.reset();
+  setBusy(submitButton, true, `正在提交到 ${providerConfig.name}...`);
+  generatorResult.setStatus(`任务已提交，正在创建 ${providerConfig.name} 任务...`, 5, "running");
 
   try {
     const result = await fetchJson("/api/generate", {
@@ -283,21 +500,107 @@ async function handleSubmit(event) {
       providerName: PROVIDER_CONFIG[result.provider || provider]?.name || providerConfig.name
     };
 
-    renderTaskMeta(result.taskId, currentTaskContext);
-    await pollTask(result.taskId, currentTaskContext.provider);
+    generatorResult.renderTaskMeta(result.taskId, currentTaskContext);
+    await pollGeneratorTask(result.taskId, currentTaskContext.provider);
   } catch (error) {
-    setStatus(error.message || "提交失败。", 0, "error");
+    generatorResult.setStatus(error.message || "提交失败。", 0, "error");
     if (error.details) {
-      resultJson.textContent = JSON.stringify(error.details, null, 2);
-      resultJson.classList.remove("hidden");
+      generatorResult.resultJson.textContent = JSON.stringify(error.details, null, 2);
+      generatorResult.resultJson.classList.remove("hidden");
     }
   } finally {
-    setBusy(false);
+    setBusy(submitButton, false, "开始生成 3D 模型");
   }
 }
 
-async function pollTask(taskId, provider) {
-  clearPoller();
+async function handleOptimizerSubmit(event) {
+  event.preventDefault();
+
+  const provider = getCurrentOptimizerProvider();
+  const operation = getCurrentOptimizerOperation();
+  const payload = new FormData();
+  payload.append("provider", provider);
+  payload.append("operation", operation);
+  payload.append("modelVersion", optimizerModelVersionSelect.value);
+  payload.append("target", optimizerTargetSelect.value);
+  payload.append("saveMode", optimizerSaveModeSelect.value);
+
+  const modelFile = modelFileInput.files?.[0];
+  const modelUrl = modelUrlInput.value.trim();
+
+  if (!modelFile && !modelUrl) {
+    optimizerResult.setStatus("请上传模型文件或填写模型 URL。", 0, "error");
+    return;
+  }
+
+  if (modelFile) {
+    payload.append("modelFile", modelFile);
+  }
+
+  if (modelUrl) {
+    payload.append("modelUrl", modelUrl);
+  }
+
+  if (operation === "retexture") {
+    const texturePrompt = texturePromptInput.value.trim();
+    const styleImage = styleImageInput.files?.[0];
+
+    if (!texturePrompt && !styleImage) {
+      optimizerResult.setStatus("AI贴图至少需要贴图提示词或一张风格参考图。", 0, "error");
+      return;
+    }
+
+    payload.append("texturePrompt", texturePrompt);
+    payload.append("preserveUv", String(preserveUvInput.checked));
+    payload.append("enablePbr", String(enablePbrInput.checked));
+    payload.append("removeLighting", String(removeLightingInput.checked));
+
+    if (styleImage) {
+      payload.append("styleImage", styleImage);
+    }
+  } else {
+    payload.append("splitPrompt", splitPromptInput.value.trim());
+    payload.append("splitStrategy", splitStrategyInput.value);
+  }
+
+  clearOptimizerPoller();
+  optimizerResult.reset();
+  setBusy(optimizerSubmitButton, true, operation === "retexture" ? "正在提交 AI 贴图..." : "正在提交 AI 拆模型...");
+  optimizerResult.setStatus(operation === "retexture" ? "正在创建 AI 贴图任务..." : "正在创建 AI 拆模型任务...", 5, "running");
+
+  try {
+    const result = await fetchJson("/api/model-optimize", {
+      method: "POST",
+      body: payload
+    });
+
+    if (!result.taskId) {
+      throw createDetailedError("优化任务没有返回任务 ID。", result);
+    }
+
+    currentOptimizationContext = {
+      provider: result.provider || provider,
+      providerName: OPTIMIZER_PROVIDER_CONFIG[result.provider || provider]?.name || provider,
+      modelVersion: result.displayModelVersion || optimizerModelVersionSelect.value,
+      operation: result.operation || operation,
+      operationLabel: result.operation === "split" ? "AI拆模型" : "AI贴图"
+    };
+
+    optimizerResult.renderTaskMeta(result.taskId, currentOptimizationContext);
+    await pollOptimizerTask(result.taskId, currentOptimizationContext.provider, currentOptimizationContext.operation);
+  } catch (error) {
+    optimizerResult.setStatus(error.message || "提交失败。", 0, "error");
+    if (error.details) {
+      optimizerResult.resultJson.textContent = JSON.stringify(error.details, null, 2);
+      optimizerResult.resultJson.classList.remove("hidden");
+    }
+  } finally {
+    setBusy(optimizerSubmitButton, false, operation === "retexture" ? "开始 AI 贴图" : "开始 AI 拆模型");
+  }
+}
+
+async function pollGeneratorTask(taskId, provider) {
+  clearGeneratorPoller();
 
   const run = async () => {
     try {
@@ -317,10 +620,10 @@ async function pollTask(taskId, provider) {
           modelVersion: task.displayModelVersion || currentTaskContext?.modelVersion || modelVersionSelect.value,
           providerName: task.providerName || currentTaskContext?.providerName || PROVIDER_CONFIG[provider]?.name || provider
         };
-        renderTaskMeta(task.transition.nextTaskId, currentTaskContext, task.transition.stageText);
-        setStatus(task.transition.statusText || "正在进入下一阶段...", progress, "running");
-        clearPoller();
-        await pollTask(task.transition.nextTaskId, provider);
+        generatorResult.renderTaskMeta(task.transition.nextTaskId, currentTaskContext, task.transition.stageText);
+        generatorResult.setStatus(task.transition.statusText || "正在进入下一阶段...", progress, "running");
+        clearGeneratorPoller();
+        await pollGeneratorTask(task.transition.nextTaskId, provider);
         return;
       }
 
@@ -331,110 +634,79 @@ async function pollTask(taskId, provider) {
         providerName: task.providerName || currentTaskContext?.providerName || PROVIDER_CONFIG[provider]?.name || provider
       };
 
-      renderTaskMeta(task.taskId || taskId, currentTaskContext, task.stageText);
-      setStatus(task.statusText || task.status, progress, tone);
-      renderTask(task);
+      generatorResult.renderTaskMeta(task.taskId || taskId, currentTaskContext, task.stageText);
+      generatorResult.setStatus(task.statusText || task.status, progress, tone);
+      generatorResult.renderTask(task);
 
       if (task.finalized) {
-        clearPoller();
+        clearGeneratorPoller();
       }
     } catch (error) {
-      clearPoller();
-      setStatus(error.message || "查询任务状态失败。", 0, "error");
+      clearGeneratorPoller();
+      generatorResult.setStatus(error.message || "查询任务状态失败。", 0, "error");
       if (error.details) {
-        resultJson.textContent = JSON.stringify(error.details, null, 2);
-        resultJson.classList.remove("hidden");
+        generatorResult.resultJson.textContent = JSON.stringify(error.details, null, 2);
+        generatorResult.resultJson.classList.remove("hidden");
       }
     }
   };
 
   await run();
-  activePoller = setInterval(run, 4000);
+  activeGeneratorPoller = setInterval(run, 4000);
 }
 
-function renderTaskMeta(taskId, context, stageText = "") {
-  taskMeta.innerHTML = "";
-  taskMeta.append(
-    createPill(`Task ID: ${taskId}`),
-    createPill(`Provider: ${context.providerName}`),
-    createPill(`Mode: ${context.mode}`),
-    createPill(`Model: ${context.modelVersion}`)
-  );
+async function pollOptimizerTask(taskId, provider, operation) {
+  clearOptimizerPoller();
 
-  if (stageText) {
-    taskMeta.append(createPill(stageText));
-  }
+  const run = async () => {
+    try {
+      const task = await fetchJson(
+        `/api/model-optimize/task/${taskId}?provider=${encodeURIComponent(provider)}&operation=${encodeURIComponent(operation)}`
+      );
+      const progress = typeof task.progress === "number" ? task.progress : 0;
+      const tone =
+        task.status === "success"
+          ? "success"
+          : task.finalized && task.status !== "success"
+            ? "error"
+            : "running";
 
-  taskMeta.classList.remove("hidden");
-}
+      currentOptimizationContext = {
+        provider,
+        providerName: task.providerName || currentOptimizationContext?.providerName || provider,
+        modelVersion: task.displayModelVersion || currentOptimizationContext?.modelVersion || optimizerModelVersionSelect.value,
+        operation: task.operation || currentOptimizationContext?.operation || operation,
+        operationLabel: task.operation === "split" ? "AI拆模型" : "AI贴图"
+      };
 
-function renderTask(task) {
-  resultJson.textContent = JSON.stringify(task.raw, null, 2);
-  resultJson.classList.remove("hidden");
+      optimizerResult.renderTaskMeta(task.taskId || taskId, currentOptimizationContext, task.stageText);
+      optimizerResult.setStatus(task.statusText || task.status, progress, tone);
+      optimizerResult.renderTask(task);
 
-  const modelUrl = getPreviewModelUrl(task);
-  const renderedImageUrl = task.renderedImage;
-
-  previewWrap.classList.add("hidden");
-  viewerWrap.classList.add("hidden");
-  renderWrap.classList.add("hidden");
-
-  if (modelUrl) {
-    modelViewer.src = modelUrl;
-    viewerWrap.classList.remove("hidden");
-    previewWrap.classList.remove("hidden");
-  } else {
-    modelViewer.removeAttribute("src");
-  }
-
-  if (renderedImageUrl) {
-    renderImage.src = renderedImageUrl;
-    renderWrap.classList.remove("hidden");
-    previewWrap.classList.remove("hidden");
-  } else {
-    renderImage.removeAttribute("src");
-  }
-
-  const links = [];
-  for (const item of task.downloadItems || []) {
-    if (item?.url) {
-      links.push(linkMarkup(item.label, item.url));
+      if (task.finalized) {
+        clearOptimizerPoller();
+      }
+    } catch (error) {
+      clearOptimizerPoller();
+      optimizerResult.setStatus(error.message || "查询优化任务状态失败。", 0, "error");
+      if (error.details) {
+        optimizerResult.resultJson.textContent = JSON.stringify(error.details, null, 2);
+        optimizerResult.resultJson.classList.remove("hidden");
+      }
     }
-  }
+  };
 
-  if (links.length > 0) {
-    downloadLinks.innerHTML = links.join("");
-    downloadLinks.classList.remove("hidden");
-  } else {
-    downloadLinks.innerHTML = "";
-    downloadLinks.classList.add("hidden");
-  }
+  await run();
+  activeOptimizerPoller = setInterval(run, 4000);
 }
 
-function resetResultBlocks() {
-  taskMeta.innerHTML = "";
-  taskMeta.classList.add("hidden");
-  previewWrap.classList.add("hidden");
-  viewerWrap.classList.add("hidden");
-  renderWrap.classList.add("hidden");
-  downloadLinks.innerHTML = "";
-  downloadLinks.classList.add("hidden");
-  resultJson.textContent = "";
-  resultJson.classList.add("hidden");
-  modelViewer.removeAttribute("src");
-  renderImage.removeAttribute("src");
+function setBusy(button, isBusy, text) {
+  button.disabled = isBusy;
+  button.textContent = text;
 }
 
-function setStatus(text, progress, tone) {
-  statusText.textContent = formatStatus(text);
-  progressText.textContent = `${Math.max(0, Math.min(100, Math.round(progress)))}%`;
-  progressFill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
-  statusCard.className = `status-card ${tone || "idle"}`;
-}
-
-function setBusy(isBusy, providerName = "") {
-  submitButton.disabled = isBusy;
-  submitButton.textContent = isBusy ? `正在提交到 ${providerName}...` : "开始生成 3D 模型";
+function getCurrentWorkspace() {
+  return document.querySelector('input[name="workspace"]:checked').value;
 }
 
 function getCurrentMode() {
@@ -445,10 +717,25 @@ function getCurrentProvider() {
   return document.querySelector('input[name="provider"]:checked').value;
 }
 
-function clearPoller() {
-  if (activePoller) {
-    clearInterval(activePoller);
-    activePoller = null;
+function getCurrentOptimizerProvider() {
+  return document.querySelector('input[name="optimizerProvider"]:checked').value;
+}
+
+function getCurrentOptimizerOperation() {
+  return document.querySelector('input[name="optimizerOperation"]:checked').value;
+}
+
+function clearGeneratorPoller() {
+  if (activeGeneratorPoller) {
+    clearInterval(activeGeneratorPoller);
+    activeGeneratorPoller = null;
+  }
+}
+
+function clearOptimizerPoller() {
+  if (activeOptimizerPoller) {
+    clearInterval(activeOptimizerPoller);
+    activeOptimizerPoller = null;
   }
 }
 
@@ -469,17 +756,17 @@ function getPreviewModelUrl(task) {
 function formatStatus(status) {
   const map = {
     queued: "排队中",
-    running: "生成中",
-    success: "生成成功",
-    failed: "生成失败",
+    running: "处理中",
+    success: "处理成功",
+    failed: "处理失败",
     banned: "任务被拦截",
     expired: "任务已过期",
     cancelled: "任务已取消",
     unknown: "状态未知",
     PENDING: "排队中",
-    IN_PROGRESS: "生成中",
-    SUCCEEDED: "生成成功",
-    FAILED: "生成失败",
+    IN_PROGRESS: "处理中",
+    SUCCEEDED: "处理成功",
+    FAILED: "处理失败",
     CANCELED: "任务已取消"
   };
   return map[status] || status;
