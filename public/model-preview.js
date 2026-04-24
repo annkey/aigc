@@ -227,6 +227,10 @@ const MODEL_PLAYBACK_TIMEOUT_MS = 120000;
 const EXPLODE_DISTANCE_SCALE = 0.32;
 const EXPLODE_ANIMATION_SPEED = 8;
 const STYLUS_HELPER_BASE_OFFSET = 0.01;
+const PEN_KEY_SCALE = 1;
+const PEN_KEY_RESET = 2;
+const PEN_KEY_TRANSFORM = 4;
+const PEN_SCALE_SENSITIVITY = 2.4;
 
 const animationClock = new THREE.Clock();
 
@@ -497,7 +501,7 @@ async function bootstrap() {
   });
   lightRange.addEventListener("input", () => updateLightStrength(Number(lightRange.value)));
   loadButton.addEventListener("click", () => void handleLoadModel());
-  resetCameraButton.addEventListener("click", resetCameraView);
+  resetCameraButton.addEventListener("click", resetModelView);
   autoRotateButton.addEventListener("click", toggleAutoRotate);
   wireframeButton.addEventListener("click", toggleWireframe);
   gridButton.addEventListener("click", toggleGrid);
@@ -600,6 +604,7 @@ async function bootstrap() {
   updateAutoRotateButton();
   updateWireframeButton();
   updateGridButton();
+  setToolLabel(resetCameraButton, "重置复位");
   updateExplodeButton();
   updateExplodeStrengthVisibility();
   updateStereoButton();
@@ -2583,6 +2588,7 @@ function collectExplodableParts(object) {
         id: mesh.uuid,
         object: mesh,
         basePosition: mesh.position.clone(),
+        baseQuaternion: mesh.quaternion.clone(),
         baseScale: mesh.scale.clone(),
         direction: directionLocal,
         distance,
@@ -2700,6 +2706,49 @@ function applyExplodePartScale(part) {
   part.object.scale.copy(part.baseScale).multiplyScalar(scaleFactor);
 }
 
+function getPenKeyGuideText() {
+  return "笔键说明：左上键缩放模型，右上键重置复位，底部键抓取后可旋转和平移";
+}
+
+function resetModelTransformState() {
+  if (!currentObject) {
+    return;
+  }
+
+  const defaults = currentObject.userData.defaultTransform;
+  if (defaults?.position && defaults?.quaternion && defaults?.scale) {
+    currentObject.position.copy(defaults.position);
+    currentObject.quaternion.copy(defaults.quaternion);
+    currentObject.scale.copy(defaults.scale);
+  }
+
+  if (selectedExplodePart && selectedExplodeSourceMaterials) {
+    selectedExplodePart.object.material = selectedExplodeSourceMaterials;
+  }
+
+  selectedExplodePart = null;
+  selectedExplodeSourceMaterials = null;
+  explodeMode = "none";
+  explodeTarget = 0;
+  explodeProgress = 0;
+
+  for (const part of explodeParts) {
+    part.dragOffset.set(0, 0, 0);
+    part.scaleFactor = 1;
+    if (part.baseQuaternion) {
+      part.object.quaternion.copy(part.baseQuaternion);
+    }
+    part.object.position.copy(part.basePosition);
+    applyExplodePartScale(part);
+  }
+
+  applyExplodedLayout();
+  updateExplodeButton();
+  updateExplodeStrengthVisibility();
+  syncPanoramaPresentation();
+  currentObject.updateMatrixWorld(true);
+}
+
 function stopPointerManipulation() {
   if (!activePointerManipulation) {
     return;
@@ -2727,6 +2776,11 @@ function clearSelectedExplodePart() {
 
 function highlightExplodePart(part) {
   if (!part?.object || !hasMultipleExplodableParts()) {
+    return;
+  }
+
+  if (selectedExplodePart?.id === part.id) {
+    applyExplodePartScale(part);
     return;
   }
 
@@ -3038,6 +3092,15 @@ function resetCameraView() {
   setStatus("视角已重置");
 }
 
+function resetModelView() {
+  if (!currentObject) {
+    return;
+  }
+
+  resetModelTransformState();
+  setStatus("模型已重置复位");
+}
+
 function isPreviewableModel(fileName) {
   return ["glb", "gltf", "fbx", "obj", "stl"].includes(getExtension(fileName));
 }
@@ -3220,6 +3283,11 @@ async function ensureDefaultPanoramaLoaded() {
 
 function updateModelStats(fileName, animationCount) {
   currentObject.userData.defaultPositionY = Number(currentObject.position.y || 0);
+  currentObject.userData.defaultTransform = {
+    position: currentObject.position.clone(),
+    quaternion: currentObject.quaternion.clone(),
+    scale: currentObject.scale.clone()
+  };
   const meshCount = countMeshes(currentObject);
   const partCount = countExplodableParts(currentObject);
   const { triangles, vertices } = countGeometryStats(currentObject);
@@ -3527,11 +3595,11 @@ function updateStereoButton() {
   if (stereoStatusDetail) {
     if (stereoActive) {
       stereoStatusDetail.textContent = trackerConnected
-        ? "当前已经进入裸眼 3D 全屏显示。模型固定在中心，头部追踪已做弱化和平滑处理，鼠标拖拽和按住笔键移动会旋转模型，笔射线会同步显示。"
+        ? `当前已经进入裸眼 3D 全屏显示。模型固定在中心，头部追踪已做弱化和平滑处理，鼠标拖拽可继续操作模型，笔射线会同步显示。${getPenKeyGuideText()}。`
         : "当前已经进入裸眼 3D 全屏显示，但未检测到设备追踪服务，正在使用固定中心的立体输出。鼠标拖拽仍可旋转模型。";
     } else if (isStereoEnabled) {
       stereoStatusDetail.textContent = runtimeReady
-        ? "裸眼 3D 已开启。进入全屏后会切到示例同款的固定中心立体显示；如果检测到设备服务，会自动启用头部追踪和笔追旋转。"
+        ? `裸眼 3D 已开启。进入全屏后会切到示例同款的固定中心立体显示；如果检测到设备服务，会自动启用头部追踪和笔追交互。${getPenKeyGuideText()}。`
         : "裸眼 3D 已开启，正在等待立体渲染引擎初始化完成。初始化完成后进入全屏即可切到立体显示。";
     } else {
       stereoStatusDetail.textContent = "当前为普通 3D 预览模式。开启裸眼 3D 后，进入全屏即可切到立体显示。";
@@ -3957,7 +4025,13 @@ function getExplodePartFromStylusIntersections() {
 
 function getPenInteractionMode(penKey) {
   const key = Number(penKey || 0);
-  if ((key & 1) === 1 || (key & 2) === 2 || (key & 4) === 4 || key === 1 || key === 2 || key === 4) {
+  if ((key & PEN_KEY_RESET) === PEN_KEY_RESET || key === PEN_KEY_RESET) {
+    return "reset";
+  }
+  if ((key & PEN_KEY_SCALE) === PEN_KEY_SCALE || key === PEN_KEY_SCALE) {
+    return "scale";
+  }
+  if ((key & PEN_KEY_TRANSFORM) === PEN_KEY_TRANSFORM || key === PEN_KEY_TRANSFORM) {
     return "transform";
   }
   return "";
@@ -3990,7 +4064,7 @@ function beginPenExplodePartGrab(pen, part, mode) {
   isPenGrabbingExplodePart = true;
   isPenGrabbingModel = false;
   penGrabStartQuaternion.copy(part.object.quaternion);
-  setStatus("笔已抓住子结构：主键或左键空间拖拽可同时旋转和平移，缩放可用鼠标滚轮");
+  setStatus(`笔已抓住子结构：底部键可空间旋转和平移。${getPenKeyGuideText()}`);
   return true;
 }
 
@@ -4046,8 +4120,52 @@ function beginPenGrab(pen, mode) {
   penGrabStartScale.copy(currentObject.scale);
   penGrabStartRotation = null;
   isPenGrabbingModel = true;
-  setStatus("笔已抓住模型：主键或左键空间拖拽可同时旋转和平移，缩放可用鼠标滚轮");
+  setStatus(`笔已抓住模型：底部键可空间旋转和平移。${getPenKeyGuideText()}`);
   return true;
+}
+
+function beginPenScale(pen) {
+  if (!currentObject) {
+    return false;
+  }
+
+  const stylusPose = getStylusPoseInPreviewRoot();
+  if (!stylusPose) {
+    return false;
+  }
+
+  penGrabStartPose = {
+    x: pen.pos.x,
+    y: pen.pos.y,
+    z: pen.pos.z
+  };
+  penInteractionMode = "scale";
+  penDragStartStylusPose = {
+    position: stylusPose.position.clone(),
+    quaternion: stylusPose.quaternion.clone()
+  };
+  penGrabStartScale.copy(currentObject.scale);
+  isPenGrabbingModel = false;
+  isPenGrabbingExplodePart = false;
+  setStatus(`笔缩放已启用：按住左上键前后移动笔可缩放模型。${getPenKeyGuideText()}`);
+  return true;
+}
+
+function updatePenScale() {
+  if (penInteractionMode !== "scale" || !currentObject || !penDragStartStylusPose?.position) {
+    return;
+  }
+
+  const stylusPose = getStylusPoseInPreviewRoot();
+  if (!stylusPose) {
+    return;
+  }
+
+  const deltaZ = stylusPose.position.z - penDragStartStylusPose.position.z;
+  const scaleDelta = THREE.MathUtils.clamp(Math.exp(-deltaZ * PEN_SCALE_SENSITIVITY), 0.2, 6);
+  currentObject.scale.copy(penGrabStartScale).multiplyScalar(scaleDelta);
+  currentObject.updateMatrixWorld(true);
+  syncPanoramaPresentation();
 }
 
 function updatePenGrab(pen) {
@@ -4097,7 +4215,7 @@ function applyPenManipulation() {
 
   if (!penPressed) {
     if (isPenGrabbingExplodePart || isPenGrabbingModel || wasPenPressed) {
-      setStatus("裸眼 3D 笔追已松开");
+      setStatus(`裸眼 3D 笔追已松开。${getPenKeyGuideText()}`);
     }
     resetPenInteractionState();
     return;
@@ -4110,6 +4228,17 @@ function applyPenManipulation() {
       y: pen.pos.y,
       z: pen.pos.z
     };
+    if (nextPenInteractionMode === "reset") {
+      resetModelTransformState();
+      setStatus(`模型已重置复位。${getPenKeyGuideText()}`);
+      return;
+    }
+    if (nextPenInteractionMode === "scale") {
+      if (!beginPenScale(pen)) {
+        setStatus(`左上键已按下，但当前无法启动模型缩放。${getPenKeyGuideText()}`);
+      }
+      return;
+    }
     if (interactionMode === "part") {
       if (!hasMultipleExplodableParts()) {
         setStatus("当前模型没有可独立交互的子结构，可切回模型整体交互");
@@ -4119,18 +4248,20 @@ function applyPenManipulation() {
 
       const hitPart = getExplodePartFromStylusIntersections();
       if (hitPart && activateSingleExplodePart(hitPart, "笔已命中子结构，正在切换到单独展开")) {
-        if (!beginPenExplodePartGrab(pen, hitPart, nextPenInteractionMode || "rotate")) {
-          setStatus("笔已命中子结构，但暂时无法抓取，请稍微移动后重试");
+        if (!beginPenExplodePartGrab(pen, hitPart, nextPenInteractionMode || "transform")) {
+          setStatus(`笔已命中子结构，但暂时无法抓取，请稍微移动后重试。${getPenKeyGuideText()}`);
         }
       } else {
-        setStatus("笔已按下：请先用射线命中某个子结构");
+        setStatus(`底部键已按下：请先用射线命中某个子结构。${getPenKeyGuideText()}`);
       }
-    } else if (!beginPenGrab(pen, nextPenInteractionMode || "rotate")) {
-      setStatus("笔已按下：请用射线命中模型后再抓取");
+    } else if (!beginPenGrab(pen, nextPenInteractionMode || "transform")) {
+      setStatus(`底部键已按下：请用射线命中模型后再抓取。${getPenKeyGuideText()}`);
     }
   }
 
-  if (isPenGrabbingExplodePart) {
+  if (penInteractionMode === "scale") {
+    updatePenScale();
+  } else if (isPenGrabbingExplodePart) {
     updatePenExplodePartGrab(pen);
   } else if (isPenGrabbingModel) {
     updatePenGrab(pen);
