@@ -1,4 +1,5 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
@@ -9,6 +10,7 @@ const rootDir = __dirname;
 const publicDir = path.join(rootDir, "public");
 const envPath = path.join(rootDir, ".env.local");
 const generatorSettingsPath = path.join(rootDir, "generator-settings.json");
+const adminUsersPath = path.join(rootDir, "admin-users.json");
 
 loadEnvFile(envPath);
 
@@ -39,6 +41,9 @@ const NORMALIZED_FINAL_STATUSES = new Set([
 const meshyTaskContexts = new Map();
 const meshyRefineTasks = new Map();
 const optimizationTaskContexts = new Map();
+const generatedTaskRecords = new Map();
+const playerClientSessions = new Map();
+const PLAYER_CLIENT_ACTIVE_MS = 2 * 60 * 1000;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -129,6 +134,94 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  if (req.method === "GET" && requestUrl.pathname === "/api/admin/assets") {
+    sendJson(res, 200, buildAdminAssetResponse());
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/admin/clients") {
+    sendJson(res, 200, buildAdminClientResponse());
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/admin/users") {
+    sendJson(res, 200, buildAdminUserResponse());
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/admin/users") {
+    try {
+      const request = toWebRequest(req, requestUrl);
+      const payload = await request.json();
+      sendJson(res, 201, {
+        ok: true,
+        user: createAdminUser(payload),
+        ...buildAdminUserResponse()
+      });
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "AdminUserCreateFailed",
+        message: error.message || "Failed to create user."
+      });
+      return;
+    }
+  }
+
+  const adminUserMatch = requestUrl.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (adminUserMatch && req.method === "PUT") {
+    try {
+      const request = toWebRequest(req, requestUrl);
+      const payload = await request.json();
+      sendJson(res, 200, {
+        ok: true,
+        user: updateAdminUser(adminUserMatch[1], payload),
+        ...buildAdminUserResponse()
+      });
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "AdminUserUpdateFailed",
+        message: error.message || "Failed to update user."
+      });
+      return;
+    }
+  }
+
+  if (adminUserMatch && req.method === "DELETE") {
+    try {
+      deleteAdminUser(adminUserMatch[1]);
+      sendJson(res, 200, buildAdminUserResponse());
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "AdminUserDeleteFailed",
+        message: error.message || "Failed to delete user."
+      });
+      return;
+    }
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/player-session") {
+    try {
+      const request = toWebRequest(req, requestUrl);
+      const payload = await request.json();
+      const session = upsertPlayerClientSession(payload, req);
+      sendJson(res, 200, {
+        ok: true,
+        sessionId: session.sessionId,
+        active: session.active
+      });
+      return;
+    } catch (error) {
+      sendJson(res, error.status || 400, {
+        error: "PlayerSessionUpdateFailed",
+        message: error.message || "Failed to update player session."
+      });
+      return;
+    }
+  }
+
   if (req.method === "POST" && requestUrl.pathname === "/api/generator-settings") {
     try {
       const request = toWebRequest(req, requestUrl);
@@ -169,11 +262,18 @@ async function handleApi(req, res, requestUrl) {
           method: "POST",
           body: form
         });
-        sendJson(res, 200, {
+        const responseBody = {
           ...remoteResult,
           generatorApiBase: GENERATOR_API_BASE,
           proxied: true
+        };
+        recordGeneratedTask(responseBody, {
+          provider,
+          modelVersion,
+          mode: form.get("mode"),
+          prompt: form.get("prompt")
         });
+        sendJson(res, 200, responseBody);
         return;
       }
 
@@ -244,11 +344,13 @@ async function handleApi(req, res, requestUrl) {
     try {
       if (GENERATOR_API_BASE) {
         const remoteTask = await proxyRemoteJson(`/api/task/${encodeURIComponent(taskId)}?provider=${encodeURIComponent(provider)}`);
-        sendJson(res, 200, {
+        const responseBody = {
           ...remoteTask,
           generatorApiBase: GENERATOR_API_BASE,
           proxied: true
-        });
+        };
+        recordGeneratedTask(responseBody, { provider, taskId });
+        sendJson(res, 200, responseBody);
         return;
       }
 
@@ -417,7 +519,7 @@ async function handleTripoGenerate(res, form) {
   });
   const createResult = unwrapTripoData(tripoResponse);
 
-  sendJson(res, 200, {
+  const responseBody = {
     ok: true,
     provider: "tripo",
     providerName: "Tripo3D",
@@ -427,7 +529,16 @@ async function handleTripoGenerate(res, form) {
     payload,
     upload: uploadInfo,
     raw: tripoResponse
+  };
+
+  recordGeneratedTask(responseBody, {
+    provider: "tripo",
+    providerName: "Tripo3D",
+    mode,
+    prompt,
+    modelVersion
   });
+  sendJson(res, 200, responseBody);
 }
 
 async function handleTripoTaskQuery(res, taskId) {
@@ -438,7 +549,7 @@ async function handleTripoTaskQuery(res, taskId) {
   const output = taskResult.output || {};
   const preferredModelUrl = output.model || output.pbr_model || output.base_model || null;
 
-  sendJson(res, 200, {
+  const responseBody = {
     ok: true,
     provider: "tripo",
     providerName: "Tripo3D",
@@ -462,7 +573,10 @@ async function handleTripoTaskQuery(res, taskId) {
     },
     downloadItems: buildTripoDownloadItems(output),
     raw: task
-  });
+  };
+
+  recordGeneratedTask(responseBody, { provider: "tripo", taskId });
+  sendJson(res, 200, responseBody);
 }
 
 async function handleMeshyGenerate(res, form) {
@@ -548,7 +662,7 @@ async function handleMeshyGenerate(res, form) {
     });
   }
 
-  sendJson(res, 200, {
+  const responseBody = {
     ok: true,
     provider: "meshy",
     providerName: "Meshy",
@@ -557,7 +671,16 @@ async function handleMeshyGenerate(res, form) {
     displayModelVersion: modelVersion,
     payload,
     raw: meshyResponse
+  };
+
+  recordGeneratedTask(responseBody, {
+    provider: "meshy",
+    providerName: "Meshy",
+    mode,
+    prompt,
+    modelVersion
   });
+  sendJson(res, 200, responseBody);
 }
 
 async function handleMeshyTaskQuery(res, taskId) {
@@ -585,6 +708,7 @@ async function handleMeshyTaskQuery(res, taskId) {
     return;
   }
 
+  recordGeneratedTask(normalized, { provider: "meshy", taskId });
   sendJson(res, 200, normalized);
 }
 
@@ -1183,6 +1307,391 @@ function buildMeshyDownloadItems(modelUrls, thumbnailUrl) {
   }
 
   return items;
+}
+
+function buildAdminAssetResponse() {
+  const tasks = Array.from(generatedTaskRecords.values())
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt || left.createdAt || 0) || 0;
+      const rightTime = Date.parse(right.updatedAt || right.createdAt || 0) || 0;
+      return rightTime - leftTime;
+    });
+
+  return {
+    ok: true,
+    updatedAt: new Date().toISOString(),
+    total: tasks.length,
+    tasks
+  };
+}
+
+function buildAdminClientResponse() {
+  const now = Date.now();
+  const clients = Array.from(playerClientSessions.values())
+    .map((client) => ({
+      ...client,
+      active: now - (Date.parse(client.lastSeenAt) || 0) <= PLAYER_CLIENT_ACTIVE_MS
+    }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.lastSeenAt || 0) || 0;
+      const rightTime = Date.parse(right.lastSeenAt || 0) || 0;
+      return rightTime - leftTime;
+    });
+
+  return {
+    ok: true,
+    updatedAt: new Date().toISOString(),
+    activeWindowSeconds: Math.round(PLAYER_CLIENT_ACTIVE_MS / 1000),
+    total: clients.length,
+    activeTotal: clients.filter((client) => client.active).length,
+    clients
+  };
+}
+
+function buildAdminUserResponse() {
+  const users = readAdminUsersFile().users
+    .map(toPublicAdminUser)
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.createdAt || 0) || 0;
+      const rightTime = Date.parse(right.createdAt || 0) || 0;
+      return rightTime - leftTime;
+    });
+
+  return {
+    ok: true,
+    updatedAt: new Date().toISOString(),
+    total: users.length,
+    users
+  };
+}
+
+function createAdminUser(payload) {
+  const store = readAdminUsersFile();
+  const now = new Date().toISOString();
+  const username = normalizeAdminUsername(payload?.username);
+  const displayName = normalizeText(payload?.displayName || username);
+  const role = normalizeAdminRole(payload?.role);
+  const disabled = Boolean(payload?.disabled);
+
+  if (store.users.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
+    throwHttpError(409, "用户名已存在。");
+  }
+
+  const user = {
+    id: crypto.randomUUID(),
+    username,
+    displayName,
+    role,
+    disabled,
+    password: buildPasswordRecord(payload?.password),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  store.users.push(user);
+  writeAdminUsersFile(store);
+  return toPublicAdminUser(user);
+}
+
+function updateAdminUser(id, payload) {
+  const store = readAdminUsersFile();
+  const decodedId = decodeURIComponent(id);
+  const index = store.users.findIndex((user) => user.id === decodedId);
+  if (index < 0) {
+    throwHttpError(404, "用户不存在。");
+  }
+
+  const current = store.users[index];
+  const nextUsername = payload?.username === undefined
+    ? current.username
+    : normalizeAdminUsername(payload.username);
+  const duplicate = store.users.some((user) => {
+    return user.id !== current.id && user.username.toLowerCase() === nextUsername.toLowerCase();
+  });
+  if (duplicate) {
+    throwHttpError(409, "用户名已存在。");
+  }
+
+  const next = {
+    ...current,
+    username: nextUsername,
+    displayName: payload?.displayName === undefined
+      ? current.displayName
+      : normalizeText(payload.displayName || nextUsername),
+    role: payload?.role === undefined ? current.role : normalizeAdminRole(payload.role),
+    disabled: payload?.disabled === undefined ? current.disabled : Boolean(payload.disabled),
+    updatedAt: new Date().toISOString()
+  };
+
+  if (payload?.password) {
+    next.password = buildPasswordRecord(payload.password);
+  }
+
+  assertAtLeastOneActiveAdmin(store.users, next);
+  store.users[index] = next;
+  writeAdminUsersFile(store);
+  return toPublicAdminUser(next);
+}
+
+function deleteAdminUser(id) {
+  const store = readAdminUsersFile();
+  const decodedId = decodeURIComponent(id);
+  const index = store.users.findIndex((user) => user.id === decodedId);
+  if (index < 0) {
+    throwHttpError(404, "用户不存在。");
+  }
+
+  const nextUsers = store.users.filter((user) => user.id !== decodedId);
+  assertAtLeastOneActiveAdmin(nextUsers);
+  writeAdminUsersFile({ users: nextUsers });
+}
+
+function assertAtLeastOneActiveAdmin(users, replacement) {
+  const nextUsers = replacement
+    ? users.map((user) => user.id === replacement.id ? replacement : user)
+    : users;
+  const hasActiveAdmin = nextUsers.some((user) => user.role === "admin" && !user.disabled);
+  if (!hasActiveAdmin) {
+    throwHttpError(400, "至少需要保留一个启用状态的管理员。");
+  }
+}
+
+function readAdminUsersFile() {
+  const fallback = {
+    users: [createDefaultAdminUser()]
+  };
+
+  if (!fs.existsSync(adminUsersPath)) {
+    return fallback;
+  }
+
+  try {
+    const data = JSON.parse(fs.readFileSync(adminUsersPath, "utf8"));
+    const users = Array.isArray(data?.users) ? data.users : [];
+    const normalizedUsers = users
+      .map(normalizeStoredAdminUser)
+      .filter(Boolean);
+    return {
+      users: normalizedUsers.length ? normalizedUsers : fallback.users
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeAdminUsersFile(store) {
+  const payload = {
+    users: store.users.map((user) => ({
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      disabled: Boolean(user.disabled),
+      password: user.password || null,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt
+    }))
+  };
+
+  fs.writeFileSync(adminUsersPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function createDefaultAdminUser() {
+  const now = new Date().toISOString();
+  return {
+    id: "admin",
+    username: "admin",
+    displayName: "管理员",
+    role: "admin",
+    disabled: false,
+    password: null,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function normalizeStoredAdminUser(user) {
+  const username = normalizeText(user?.username);
+  if (!username) {
+    return null;
+  }
+
+  return {
+    id: normalizeText(user?.id) || crypto.randomUUID(),
+    username,
+    displayName: normalizeText(user?.displayName || username),
+    role: normalizeAdminRole(user?.role, "user"),
+    disabled: Boolean(user?.disabled),
+    password: user?.password && typeof user.password === "object" ? user.password : null,
+    createdAt: normalizeText(user?.createdAt) || new Date().toISOString(),
+    updatedAt: normalizeText(user?.updatedAt) || normalizeText(user?.createdAt) || new Date().toISOString()
+  };
+}
+
+function normalizeAdminUsername(value) {
+  const username = normalizeText(value);
+  if (!/^[a-zA-Z0-9_.-]{2,32}$/.test(username)) {
+    throwHttpError(400, "用户名需为 2-32 位字母、数字、下划线、点或短横线。");
+  }
+  return username;
+}
+
+function normalizeAdminRole(value, fallback = "user") {
+  const role = normalizeText(value || fallback).toLowerCase();
+  if (role !== "admin" && role !== "user") {
+    throwHttpError(400, "用户角色只能是管理员或普通用户。");
+  }
+  return role;
+}
+
+function buildPasswordRecord(password) {
+  const value = String(password || "");
+  if (!value) {
+    return null;
+  }
+
+  if (value.length < 6) {
+    throwHttpError(400, "密码长度至少 6 位。");
+  }
+
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(value, salt, 64).toString("hex");
+  return {
+    algorithm: "scrypt",
+    salt,
+    hash
+  };
+}
+
+function toPublicAdminUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+    roleText: user.role === "admin" ? "管理员" : "普通用户",
+    disabled: Boolean(user.disabled),
+    statusText: user.disabled ? "已禁用" : "已启用",
+    hasPassword: Boolean(user.password?.hash),
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  };
+}
+
+function throwHttpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  throw error;
+}
+
+function recordGeneratedTask(task, fallback = {}) {
+  const taskId = normalizeText(task?.taskId || task?.id || fallback.taskId);
+  if (!taskId) {
+    return null;
+  }
+
+  const existing = generatedTaskRecords.get(taskId) || {};
+  const now = new Date().toISOString();
+  const provider = normalizeProvider(task?.provider || fallback.provider || existing.provider);
+  const providerName = task?.providerName || fallback.providerName || existing.providerName || (provider === "meshy" ? "Meshy" : "Tripo3D");
+  const mode = normalizeText(task?.mode || fallback.mode || existing.mode || "text");
+  const input = task?.input && typeof task.input === "object" ? task.input : {};
+  const output = task?.output && typeof task.output === "object" ? task.output : existing.output || null;
+  const modelUrls = task?.modelUrls && typeof task.modelUrls === "object" ? task.modelUrls : existing.modelUrls || null;
+  const downloadItems = Array.isArray(task?.downloadItems) ? task.downloadItems : buildDownloadItemsFromTask(task, modelUrls);
+  const prompt = normalizeText(fallback.prompt || input.prompt || existing.prompt || task?.payload?.prompt || "");
+  const preferredModelUrl = normalizeText(task?.preferredModelUrl || existing.preferredModelUrl || "");
+
+  const nextRecord = {
+    id: taskId,
+    taskId,
+    provider,
+    providerName,
+    mode,
+    prompt,
+    displayModelVersion: normalizeText(task?.displayModelVersion || fallback.modelVersion || existing.displayModelVersion || ""),
+    status: normalizeText(task?.status || existing.status || "queued"),
+    statusText: normalizeText(task?.statusText || existing.statusText || task?.status || "queued"),
+    stageText: normalizeText(task?.stageText || existing.stageText || ""),
+    progress: typeof task?.progress === "number" ? task.progress : Number(existing.progress || 0),
+    finalized: Boolean(task?.finalized ?? existing.finalized ?? false),
+    preferredModelUrl,
+    renderedImage: normalizeText(task?.renderedImage || existing.renderedImage || ""),
+    modelUrls,
+    output,
+    downloadItems,
+    proxied: Boolean(task?.proxied || existing.proxied),
+    createdAt: existing.createdAt || now,
+    updatedAt: now
+  };
+
+  generatedTaskRecords.set(taskId, nextRecord);
+  return nextRecord;
+}
+
+function buildDownloadItemsFromTask(task, modelUrls) {
+  if (Array.isArray(task?.downloadItems)) {
+    return task.downloadItems;
+  }
+
+  const items = [];
+  const preferredModelUrl = normalizeText(task?.preferredModelUrl);
+  if (preferredModelUrl) {
+    items.push({ label: "下载模型", url: preferredModelUrl });
+  }
+
+  for (const [key, url] of Object.entries(modelUrls || {})) {
+    if (url && !items.some((item) => item.url === url)) {
+      items.push({ label: `下载 ${key}`, url });
+    }
+  }
+
+  if (task?.renderedImage) {
+    items.push({ label: "下载预览图", url: task.renderedImage });
+  }
+
+  return items;
+}
+
+function upsertPlayerClientSession(payload, req) {
+  const sessionId = normalizeText(payload?.sessionId) || `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const existing = playerClientSessions.get(sessionId) || {};
+  const now = new Date().toISOString();
+  const client = {
+    sessionId,
+    active: payload?.event === "close" ? false : true,
+    path: normalizeText(payload?.path || existing.path || "/model-preview.html"),
+    title: normalizeText(payload?.title || existing.title || "3D 模型播放器"),
+    userAgent: normalizeText(payload?.userAgent || existing.userAgent || req.headers["user-agent"] || ""),
+    language: normalizeText(payload?.language || existing.language || ""),
+    platform: normalizeText(payload?.platform || existing.platform || ""),
+    timezone: normalizeText(payload?.timezone || existing.timezone || ""),
+    viewport: sanitizeClientSize(payload?.viewport || existing.viewport),
+    screen: sanitizeClientSize(payload?.screen || existing.screen),
+    referrer: normalizeText(payload?.referrer || existing.referrer || ""),
+    ip: getClientIp(req),
+    firstSeenAt: existing.firstSeenAt || now,
+    lastSeenAt: now
+  };
+
+  playerClientSessions.set(sessionId, client);
+  return client;
+}
+
+function sanitizeClientSize(value) {
+  if (!value || typeof value !== "object") {
+    return { width: 0, height: 0 };
+  }
+
+  return {
+    width: Number(value.width || 0),
+    height: Number(value.height || 0)
+  };
+}
+
+function getClientIp(req) {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwardedFor || req.socket?.remoteAddress || "";
 }
 
 function buildLocalGeneratorConfigResponse() {
