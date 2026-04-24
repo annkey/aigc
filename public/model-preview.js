@@ -226,6 +226,7 @@ let activePointerManipulation = null;
 const MODEL_PLAYBACK_TIMEOUT_MS = 120000;
 const EXPLODE_DISTANCE_SCALE = 0.32;
 const EXPLODE_ANIMATION_SPEED = 8;
+const STYLUS_HELPER_BASE_OFFSET = 0.01;
 
 const animationClock = new THREE.Clock();
 
@@ -3875,11 +3876,15 @@ function updateStylusRay() {
   stylusRaycaster.line.visible = true;
   stylusRaycaster.helper.visible = true;
   stylusRaycaster.updatePose(pen);
+  stylusRaycaster.line.updateMatrixWorld(true);
+  stylusRaycaster.helper.updateMatrixWorld(true);
 
   if (isPenGrabbingExplodePart && penGrabbedExplodePart?.object && penExplodePartGrabHitPointLocal) {
     const lockedHitPoint = penGrabbedExplodePart.object.localToWorld(penExplodePartGrabHitPointLocal.clone());
+    stylusRaycaster.helper.quaternion.copy(stylusRaycaster.line.quaternion);
     stylusRaycaster.helper.position.copy(lockedHitPoint);
-    const lockedLinePoint = stylusRaycaster.line.worldToLocal(lockedHitPoint.clone());
+    const helperBaseWorld = stylusRaycaster.helper.localToWorld(new THREE.Vector3(0, 0, STYLUS_HELPER_BASE_OFFSET));
+    const lockedLinePoint = stylusRaycaster.line.worldToLocal(helperBaseWorld);
     stylusRaycaster.points[1].copy(lockedLinePoint);
     stylusRaycaster.line.geometry.setFromPoints(stylusRaycaster.points);
     lastStylusIntersections = [];
@@ -3888,8 +3893,10 @@ function updateStylusRay() {
 
   if (isPenGrabbingModel && currentObject && penGrabHitPointLocal) {
     const lockedHitPoint = currentObject.localToWorld(penGrabHitPointLocal.clone());
+    stylusRaycaster.helper.quaternion.copy(stylusRaycaster.line.quaternion);
     stylusRaycaster.helper.position.copy(lockedHitPoint);
-    const lockedLinePoint = stylusRaycaster.line.worldToLocal(lockedHitPoint.clone());
+    const helperBaseWorld = stylusRaycaster.helper.localToWorld(new THREE.Vector3(0, 0, STYLUS_HELPER_BASE_OFFSET));
+    const lockedLinePoint = stylusRaycaster.line.worldToLocal(helperBaseWorld);
     stylusRaycaster.points[1].copy(lockedLinePoint);
     stylusRaycaster.line.geometry.setFromPoints(stylusRaycaster.points);
     lastStylusIntersections = [];
